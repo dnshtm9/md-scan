@@ -350,7 +350,7 @@ class Lexer {
       const group = [];
       let p;
       for (p = 0; p < lines.length; p++) {
-        if (/^ {0,3}>/.test(lines[p])) {
+        if (isQuoteLine(lines[p])) {
           group.push(lines[p]);
           started = true;
         } else if (!started) {
@@ -384,7 +384,7 @@ class Lexer {
         if (take.length > 0) rawText += '\n' + take.join('\n');
         textText = textText.substring(0, textText.length - inner.text.length) + quoted.text;
         lines = lines.slice(take.length);
-        if (lines.length > 0 && /^ {0,3}>/.test(lines[0])) continue;
+        if (lines.length > 0 && isQuoteLine(lines[0])) continue;
         break;
       } else if (last && last.type === 'list') {
         const inner = last;
@@ -1451,6 +1451,13 @@ function isListItemStart(line, sp) {
 }
 
 /** Any block start that ends a list item's continuation line. */
+/** True for a line starting with up to three spaces and ">". */
+function isQuoteLine(s) {
+  let i = 0;
+  while (i < 3 && s.charCodeAt(i) === 32) i++;
+  return s.charCodeAt(i) === 62;
+}
+
 function startsBlockAt(line, n, htmlRe) {
   let sp = 0;
   while (sp < line.length && line.charCodeAt(sp) === 32) sp++;
