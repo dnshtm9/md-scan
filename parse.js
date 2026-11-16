@@ -127,6 +127,10 @@ const BLOCK = {
   text: /^[^\n]+/,
 };
 
+// BLOCK.hr without the leading anchor, for testing at a list cursor without
+// slicing the remaining source.
+const HR_STICKY = new RegExp(BLOCK.hr.source.slice(1), 'y');
+
 const GF_BLOCK = {
   lheading: /^(?! {0,3}(?:[*+-]|\d{1,9}[.)]) |(?: {4}| {0,3}\t)| {0,3}(?:`{3,}|~{3,})| {0,3}>| {0,3}#{1,6}(?:\s|$)| {0,3}<[^\n>]+>\n| {0,3}\|?(?:[:\- ]*\|)+[\:\- ]*\n)((?:.|\n(?!\s*?\n| {0,3}(?:[*+-]|\d{1,9}[.)]) | {0,3}(?:`{3,}|~{3,})| {0,3}>| {0,3}#{1,6}(?:\s|$)| {0,3}(?:(?:-[\t ]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})(?:\n+|$)| {0,3}<[^\n>]+>\n| {0,3}\|?(?:[:\- ]*\|)+[\:\- ]*\n))+?)\n {0,3}(=+|-+)[ \t]*(?:\n+|$)/,
   paragraph: /^([^\n]+(?:\n(?! {0,3}((?:-[\t ]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})(?:\n+|$)| {0,3}#{1,6}(?:\s|$)| {0,3}>| {0,3}(?:`{3,}(?=[^`\n]*(?:\n|$))|~~~)[^\n]*(?:\n|$)| {0,3}(?:[*+-]|1[.)])[ \t]+[^ \t\n]| {0,3}(?:<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|meta|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?: +|\n|\/?>)|<(?:(?:script|pre|style|textarea)(?:[\s>]|$)|!--)|<\?|<![A-Za-z]|<!\[CDATA\[)| *([^\n ].*)\n {0,3}((?:\| *)?:?-+:? *(?:\| *:?-+:? *)*(?:\| *)?)(?:\n((?:(?! *\n| {0,3}((?:-[\t ]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})(?:\n+|$)| {0,3}#{1,6}(?:\s|$)| {0,3}>|(?: {4}| {0,3}	)[^\n]| {0,3}(?:`{3,}(?=[^`\n]*(?:\n|$))|~~~)[^\n]*(?:\n|$)| {0,3}(?:[*+-]|1[.)])[ \t]| {0,3}(?:<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|meta|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?: +|\n|\/?>)|<(?:(?:script|pre|style|textarea)(?:[\s>]|$)|!--)|<\?|<![A-Za-z]|<!\[CDATA\[)).*(?:\n|$))*)\n*|$)|[ \t]+\n)[^\n]+)*)/,
@@ -428,16 +432,23 @@ class Lexer {
     while (pos < whole.length) {
       let emptyStart = false;
       let text = '';
-      const rest = whole.slice(pos);
-      const m = itemRe.exec(rest);
-      if (!m || BLOCK.hr.test(rest)) break;
+      itemRe.lastIndex = pos;
+      const m = itemRe.exec(whole);
+      HR_STICKY.lastIndex = pos;
+      if (!m || HR_STICKY.test(whole)) break;
       const begin = pos;
       pos += m[0].length;
       const m2 = m[2];
       const nl0 = m2.indexOf('\n');
       const firstLine = nl0 < 0 ? m2 : m2.slice(0, nl0);
       const markerLen = m[1].length;
-      let content = firstLine.replace(/^[ \t]+/, (ws) => expandTabs(ws, markerLen));
+      let lead0 = 0;
+      while (lead0 < firstLine.length) {
+        const ch = firstLine.charCodeAt(lead0);
+        if (ch !== 32 && ch !== 9) break;
+        lead0++;
+      }
+      let content = lead0 === 0 ? firstLine : expandTabs(firstLine.slice(0, lead0), markerLen) + firstLine.slice(lead0);
       let nl = whole.indexOf('\n', pos);
       if (nl < 0) nl = whole.length;
       let nextLine = whole.slice(pos, nl);
@@ -502,7 +513,7 @@ class Lexer {
       list.items.push({
         type: 'list_item',
         raw: itemRaw,
-        task: /^\[[ xX]\][ \t]+\S/.test(text),
+        task: text.charCodeAt(0) === 91 && /^\[[ xX]\][ \t]+\S/.test(text),
         loose: false,
         text,
         tokens: [],
@@ -628,7 +639,9 @@ class Lexer {
   itemRe(markerSrc) {
     let re = this.itemRes.get(markerSrc);
     if (!re) {
-      re = new RegExp('^( {0,3}' + markerSrc + ')((?:[ \\t][^\\n]*)?(?:\\n|$))');
+      // Sticky, not anchored: match at the current cursor of the whole source
+      // instead of allocating a fresh slice for every item iteration.
+      re = new RegExp('( {0,3}' + markerSrc + ')((?:[ \\t][^\\n]*)?(?:\\n|$))', 'y');
       this.itemRes.set(markerSrc, re);
     }
     return re;
@@ -1322,13 +1335,14 @@ function scanTextLength(src, hasAt) {
       continue;
     }
     // Any other non-alphanumeric character: a mailto:/xmpp: right after it
-    // ends the run, and an e-mail address may start at it.
+    // ends the run, and an e-mail address may start at it. Record its escape
+    // flag first: the q + 1 return includes this character in the run.
+    if ((f & 32) !== 0) TEXT_ESC = true;
     if (q + 1 < len) {
       const d = src.charCodeAt(q + 1);
       if (d === 109 ? src.startsWith('mailto:', q + 1) : d === 120 && src.startsWith('xmpp:', q + 1)) return q + 1;
     }
     if (hasAt && (f & 16) !== 0 && !prevEmail && emailRunBeforeAt(src, q, len)) return q;
-    if ((f & 32) !== 0) TEXT_ESC = true;
     prevEmail = (f & 16) !== 0;
     q++;
   }

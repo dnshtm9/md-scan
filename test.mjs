@@ -61,6 +61,9 @@ const regressions = [
   ['~~𝐀a~~', '<p><del>𝐀a</del></p>\n'],
   ['_𝐀a_', '<p><em>𝐀a</em></p>\n'],
   ['*🙂a* + ~~🙂b~~', '<p><em>🙂a</em> + <del>🙂b</del></p>\n'],
+  // The text run ends on a mailto: trigger; the trigger's preceding escape
+  // character is still part of the run and must be escaped.
+  ['*>mailto:', '<p>*&gt;mailto:</p>\n'],
 ];
 let regPass = 0;
 for (const [md, want] of regressions) {
