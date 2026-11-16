@@ -122,6 +122,26 @@ const GF_BLOCK = {
 
 const PUNCT = /^((?![*_])[\s\p{P}\p{S}])/u;
 const ALNUM = /[\p{L}\p{N}]/u;
+const PREV_WS = /\s/;
+
+// Characters that terminate an inline text run in marked's text rule.
+const TEXT_STOP = new Uint8Array(128);
+for (const ch of '\\<![`*~_') TEXT_STOP[ch.charCodeAt(0)] = 1;
+// Characters allowed in the local part of an e-mail address (text rule).
+const EMAIL_CHAR = new Uint8Array(128);
+for (const ch of "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.!#$%&'*+/=?_`{|}~-") EMAIL_CHAR[ch.charCodeAt(0)] = 1;
+
+// Per-character flags for the inline text scan:
+// 1 stops the run, 2 is a space, 4 starts a protocol, 8 is not alphanumeric,
+// 16 is an e-mail address character.
+const SCAN = new Uint8Array(128);
+for (let c = 0; c < 128; c++) {
+  if (TEXT_STOP[c] === 1) SCAN[c] = 1;
+  if (c === 32) SCAN[c] |= 2;
+  else if (c === 104 || c === 72 || c === 102 || c === 70 || c === 119) SCAN[c] |= 4;
+  if (!(c >= 48 && c <= 57) && !(c >= 65 && c <= 90) && !(c >= 97 && c <= 122)) SCAN[c] |= 8;
+  if (EMAIL_CHAR[c] === 1) SCAN[c] |= 16;
+}
 const ANY_LINE = /\n.*\n/;
 
 const INLINE = {
@@ -150,6 +170,46 @@ const INLINE = {
 
 /* ================================ lexer ================================= */
 
+/** True when the line after the first could be a table delimiter row. */
+function tableHeadPossible(src) {
+  const nl1 = src.indexOf('\n');
+  if (nl1 < 0) return false;
+  let nl2 = src.indexOf('\n', nl1 + 1);
+  if (nl2 < 0) nl2 = src.length;
+  let seen = false;
+  for (let i = nl1 + 1; i < nl2; i++) {
+    const ch = src.charCodeAt(i);
+    if (ch === 58 || ch === 124) seen = true;
+    else if (ch !== 32 && ch !== 45) return false;
+  }
+  return seen;
+}
+
+/** True when some line after the first is a setext underline (a `=`/`-` run). */
+function hasSetextUnderline(src) {
+  const len = src.length;
+  let i = src.indexOf('\n');
+  while (i >= 0) {
+    let j = i + 1;
+    let sp = 0;
+    while (j < len && src.charCodeAt(j) === 32 && sp < 4) { j++; sp++; }
+    const ch = src.charCodeAt(j);
+    if (sp <= 3 && (ch === 61 || ch === 45)) {
+      let k = j + 1;
+      while (k < len && src.charCodeAt(k) === ch) k++;
+      let t = k;
+      while (t < len && (src.charCodeAt(t) === 32 || src.charCodeAt(t) === 9)) t++;
+      if (t === len || src.charCodeAt(t) === 10) return true;
+    }
+    // A blank line ends the paragraph a setext heading could be built from.
+    let b = i + 1;
+    while (b < len && (src.charCodeAt(b) === 32 || src.charCodeAt(b) === 9)) b++;
+    if (b === len || src.charCodeAt(b) === 10) return false;
+    i = src.indexOf('\n', i + 1);
+  }
+  return false;
+}
+
 class Lexer {
   constructor() {
     this.top = true;
@@ -161,12 +221,7 @@ class Lexer {
     this.queue = [];
     this.masks = [];
     this.itemRes = new Map();
-    this.nextBulletRes = [];
-    this.hrRes = [];
-    this.fenceRes = [];
-    this.headingRes = [];
     this.htmlRes = [];
-    this.bqRes = [];
   }
 
   lex(md) {
@@ -303,7 +358,7 @@ class Lexer {
     const first = BLOCK.list.exec(src);
     if (!first) return;
     const whole = src;
-    const used = () => whole.length - src.length;
+    let pos = 0;
     let marker = first[1].trim();
     const ordered = marker.length > 1;
     const list = {
@@ -317,17 +372,20 @@ class Lexer {
     const markerSrc = ordered ? '\\d{1,9}\\' + marker.slice(-1) : '\\' + marker;
     const itemRe = this.itemRe(markerSrc);
     let crossedBlank = false;
-    while (src) {
+    while (pos < whole.length) {
       let emptyStart = false;
-      let text = '';
-      let m;
-      if (!(m = itemRe.exec(src)) || BLOCK.hr.test(src)) break;
-      const begin = used();
-      src = src.substring(m[0].length);
+      const parts = [];
+      const rest = whole.slice(pos);
+      const m = itemRe.exec(rest);
+      if (!m || BLOCK.hr.test(rest)) break;
+      const begin = pos;
+      pos += m[0].length;
       const firstLine = m[2].split('\n', 1)[0];
       const markerLen = m[1].length;
       let content = firstLine.replace(/^[ \t]+/, (ws) => expandTabs(ws, markerLen));
-      let nextLine = src.split('\n', 1)[0];
+      let nl = whole.indexOf('\n', pos);
+      if (nl < 0) nl = whole.length;
+      let nextLine = whole.slice(pos, nl);
       let blankFirst = !content.trim();
       let indent = 0;
       if (blankFirst) {
@@ -335,47 +393,44 @@ class Lexer {
       } else {
         indent = content.search(/[^ ]/);
         indent = indent > 4 ? 1 : indent;
-        text = content.slice(indent);
+        parts.push(content.slice(indent));
         indent += markerLen;
       }
       if (blankFirst && /^[ \t]*$/.test(nextLine)) {
-        src = src.substring(nextLine.length + 1);
+        pos = nl < whole.length ? nl + 1 : whole.length;
         emptyStart = true;
       }
       if (!emptyStart) {
-        const bulletRe = this.nextBullet(indent);
-        const hrRe = this.hrRe(indent);
-        const fenceRe = this.fenceRe(indent);
-        const headRe = this.headingRe(indent);
-        const htmlRe = this.htmlRe(indent);
-        const bqRe = this.bqRe(indent);
-        for (;;) {
-          if (!src) break;
-          const line = src.split('\n', 1)[0];
-          let check = line;
-          let expanded = line.replace(/^[ \t]+/, (ws) => expandTabs(ws));
-          if (fenceRe.test(check) || headRe.test(check) || htmlRe.test(check) || bqRe.test(check) || bulletRe.test(check) || hrRe.test(check)) break;
-          if (expanded.search(/[^ ]/) >= indent || !line.trim()) {
-            text += '\n' + expanded.slice(indent);
+        const n = Math.max(0, Math.min(3, indent - 1));
+        const htmlRe = this.htmlRe(n);
+        while (pos < whole.length) {
+          nl = whole.indexOf('\n', pos);
+          if (nl < 0) nl = whole.length;
+          const line = whole.slice(pos, nl);
+          const lead = leadingWhitespace(line);
+          const blank = lead === line.length;
+          const expanded = hasTabBefore(line, lead) ? expandTabs(line.slice(0, lead)) + line.slice(lead) : line;
+          if (startsBlockAt(line, n, htmlRe)) break;
+          const width = blank ? expanded.length : expandedWidth(line, lead);
+          if (width >= indent || blank) {
+            parts.push('\n' + expanded.slice(indent));
           } else {
             if (
               blankFirst ||
               content.replace(/\t/g, '    ').search(/[^ ]/) >= 4 ||
-              fenceRe.test(content) ||
-              headRe.test(content) ||
-              htmlRe.test(content) ||
-              hrRe.test(content)
+              startsContentAt(content, n, htmlRe)
             ) break;
             const setext = !/^ {0,3}(?:=+|-+) *$/.test(line) ? line
               : GF_BLOCK.lheading.test(content + '\n' + line) ? '    ' + expanded.replace(/^ {0,3}/, '') : line;
-            text += '\n' + setext;
+            parts.push('\n' + setext);
           }
-          blankFirst = !line.trim();
-          src = src.substring(line.length + 1);
+          blankFirst = blank;
+          pos = nl < whole.length ? nl + 1 : whole.length;
           content = expanded.slice(indent);
         }
       }
-      const itemRaw = whole.slice(begin, used());
+      const text = parts.join('');
+      const itemRaw = whole.slice(begin, pos);
       if (!list.loose) {
         if (crossedBlank) list.loose = true;
         else if (/\n[ \t]*\n[ \t]*$/.test(itemRaw)) crossedBlank = true;
@@ -393,7 +448,7 @@ class Lexer {
     if (!lastItem) return;
     lastItem.raw = lastItem.raw.trimEnd();
     lastItem.text = lastItem.text.trimEnd();
-    list.raw = whole.slice(0, used()).trimEnd();
+    list.raw = whole.slice(0, pos).trimEnd();
     for (const item of list.items) {
       this.top = false;
       item.tokens = this.blockTokens(item.text, []);
@@ -528,62 +583,11 @@ class Lexer {
     return re;
   }
 
-  nextBullet(indent) {
-    const n = Math.max(0, Math.min(3, indent - 1));
-    let re = this.nextBulletRes[n];
-    if (!re) {
-      re = new RegExp('^ {0,' + n + '}(?:[*+-]|\\d{1,9}[.)])((?:[ \\t][^\\n]*)?(?:\\n|$))');
-      this.nextBulletRes[n] = re;
-    }
-    return re;
-  }
-
-  hrRe(indent) {
-    const n = Math.max(0, Math.min(3, indent - 1));
-    let re = this.hrRes[n];
-    if (!re) {
-      re = new RegExp('^ {0,' + n + '}((?:-[ \\t]*){3,}|(?:_[ \\t]*){3,}|(?:\\*[ \\t]*){3,})(?:\\n+|$)');
-      this.hrRes[n] = re;
-    }
-    return re;
-  }
-
-  fenceRe(indent) {
-    const n = Math.max(0, Math.min(3, indent - 1));
-    let re = this.fenceRes[n];
-    if (!re) {
-      re = new RegExp('^ {0,' + n + '}(?:```|~~~)');
-      this.fenceRes[n] = re;
-    }
-    return re;
-  }
-
-  headingRe(indent) {
-    const n = Math.max(0, Math.min(3, indent - 1));
-    let re = this.headingRes[n];
-    if (!re) {
-      re = new RegExp('^ {0,' + n + '}#{1,6}(?:\\s|$)');
-      this.headingRes[n] = re;
-    }
-    return re;
-  }
-
-  htmlRe(indent) {
-    const n = Math.max(0, Math.min(3, indent - 1));
+  htmlRe(n) {
     let re = this.htmlRes[n];
     if (!re) {
       re = new RegExp('^ {0,' + n + '}(?:</?(?:' + TAGS + ')(?: +|$|/?>)|<(?:(?:script|pre|style|textarea)(?:[\\s>]|$)|!--)|<\\?|<![A-Za-z]|<!\\[CDATA\\[)', 'i');
       this.htmlRes[n] = re;
-    }
-    return re;
-  }
-
-  bqRe(indent) {
-    const n = Math.max(0, Math.min(3, indent - 1));
-    let re = this.bqRes[n];
-    if (!re) {
-      re = new RegExp('^ {0,' + n + '}>');
-      this.bqRes[n] = re;
     }
     return re;
   }
@@ -596,14 +600,30 @@ class Lexer {
       if (src.length < marker) marker = src.length;
       else throw new Error('Infinite loop on byte: ' + src.charCodeAt(0));
       let tok;
-      if ((tok = this.space(src))) {
+      // Classify the head once: blank lines and indented lines can only be
+      // these tokenizers, and the first non-space character limits the rest.
+      // The tokenizers that remain run in marked's order.
+      const len = src.length;
+      let ws = 0;
+      let tabAt = -1;
+      let c = 10;
+      while (ws < len) {
+        c = src.charCodeAt(ws);
+        if (c === 32) ws++;
+        else if (c === 9) { if (tabAt < 0) tabAt = ws; ws++; }
+        else break;
+      }
+      const blank = ws === len || c === 10;
+      const indented = !blank && (ws >= 4 || (tabAt >= 0 && tabAt < 4));
+      const fc = blank || indented ? -1 : c;
+      if (blank && (tok = this.space(src))) {
         src = src.substring(tok.raw.length);
         const prev = tokens[tokens.length - 1];
         if (tok.raw.length === 1 && prev !== undefined) prev.raw += '\n';
         else tokens.push(tok);
         continue;
       }
-      if ((tok = this.code(src))) {
+      if (indented && (tok = this.code(src))) {
         src = src.substring(tok.raw.length);
         const prev = tokens[tokens.length - 1];
         if (prev && (prev.type === 'paragraph' || prev.type === 'text')) {
@@ -613,37 +633,37 @@ class Lexer {
         } else tokens.push(tok);
         continue;
       }
-      if ((tok = this.fences(src))) {
+      if ((fc === 96 || fc === 126) && (tok = this.fences(src))) {
         src = src.substring(tok.raw.length);
         tokens.push(tok);
         continue;
       }
-      if ((tok = this.heading(src))) {
+      if (fc === 35 && (tok = this.heading(src))) {
         src = src.substring(tok.raw.length);
         tokens.push(tok);
         continue;
       }
-      if ((tok = this.hr(src))) {
+      if ((fc === 45 || fc === 95 || fc === 42) && (tok = this.hr(src))) {
         src = src.substring(tok.raw.length);
         tokens.push(tok);
         continue;
       }
-      if ((tok = this.blockquote(src))) {
+      if (fc === 62 && (tok = this.blockquote(src))) {
         src = src.substring(tok.raw.length);
         tokens.push(tok);
         continue;
       }
-      if ((tok = this.list(src))) {
+      if ((fc === 42 || fc === 43 || fc === 45 || (fc >= 48 && fc <= 57)) && (tok = this.list(src))) {
         src = src.substring(tok.raw.length);
         tokens.push(tok);
         continue;
       }
-      if ((tok = this.html(src))) {
+      if (fc === 60 && (tok = this.html(src))) {
         src = src.substring(tok.raw.length);
         tokens.push(tok);
         continue;
       }
-      if ((tok = this.def(src))) {
+      if (fc === 91 && (tok = this.def(src))) {
         src = src.substring(tok.raw.length);
         const prev = tokens[tokens.length - 1];
         if (prev && (prev.type === 'paragraph' || prev.type === 'text')) {
@@ -656,12 +676,12 @@ class Lexer {
         }
         continue;
       }
-      if ((tok = this.table(src))) {
+      if (tableHeadPossible(src) && (tok = this.table(src))) {
         src = src.substring(tok.raw.length);
         tokens.push(tok);
         continue;
       }
-      if ((tok = this.lheading(src))) {
+      if (hasSetextUnderline(src) && (tok = this.lheading(src))) {
         src = src.substring(tok.raw.length);
         tokens.push(tok);
         continue;
@@ -716,9 +736,11 @@ class Lexer {
 
   inlineCore(src, tokens) {
     let masked = src;
-    if (src.includes('*') || src.includes('_') || src.includes('~')) masked = this.buildMask(src);
-    const info = maskInfo(masked);
-    this.masks.push(info);
+    if (src.includes('*') || src.includes('_') || src.includes('~')) {
+      // The mask only rewrites code spans, link text, tags and escapes.
+      if (src.includes('`') || src.includes('[') || src.includes('<') || src.includes('\\')) masked = this.buildMask(src);
+    }
+    this.masks.push({ maskedSrc: masked, em: null, del: -1 });
     try {
       return this.inlineLoop(src, masked, tokens);
     } finally {
@@ -778,57 +800,46 @@ class Lexer {
       if (!wasText) lastChar = '';
       wasText = false;
 
+      // Only the tokenizers whose first character can match at this offset are
+      // tried, in marked's order; everything else falls through to url/text.
+      const c = src.charCodeAt(0);
       let tok;
-      if ((tok = this.escapeT(src))) {
+      if (c === 92) {
+        tok = this.escapeT(src) || this.brT(src);
+      } else if (c === 60) {
+        tok = this.tagT(src) || this.autolinkT(src);
+      } else if (c === 91 || c === 33) {
+        tok = this.linkT(src);
+        if (tok) {
+          src = src.substring(tok.raw.length);
+          tokens.push(tok);
+          continue;
+        }
+        tok = this.reflinkT(src);
+        if (tok) {
+          src = src.substring(tok.raw.length);
+          const prev = tokens[tokens.length - 1];
+          if (tok.type === 'text' && prev && prev.type === 'text') {
+            prev.raw += tok.raw;
+            prev.text += tok.text;
+          } else tokens.push(tok);
+          continue;
+        }
+      } else if (c === 42 || c === 95) {
+        tok = this.emStrongT(src, masked, lastChar);
+      } else if (c === 96) {
+        tok = this.codespanT(src);
+      } else if (c === 126) {
+        tok = this.delT(src, masked, lastChar);
+      } else if (c === 32) {
+        tok = this.brT(src);
+      }
+      if (tok) {
         src = src.substring(tok.raw.length);
         tokens.push(tok);
         continue;
       }
-      if ((tok = this.tagT(src))) {
-        src = src.substring(tok.raw.length);
-        tokens.push(tok);
-        continue;
-      }
-      if ((tok = this.linkT(src))) {
-        src = src.substring(tok.raw.length);
-        tokens.push(tok);
-        continue;
-      }
-      if ((tok = this.reflinkT(src))) {
-        src = src.substring(tok.raw.length);
-        const prev = tokens[tokens.length - 1];
-        if (tok.type === 'text' && prev && prev.type === 'text') {
-          prev.raw += tok.raw;
-          prev.text += tok.text;
-        } else tokens.push(tok);
-        continue;
-      }
-      if ((tok = this.emStrongT(src, masked, lastChar))) {
-        src = src.substring(tok.raw.length);
-        tokens.push(tok);
-        continue;
-      }
-      if ((tok = this.codespanT(src))) {
-        src = src.substring(tok.raw.length);
-        tokens.push(tok);
-        continue;
-      }
-      if ((tok = this.brT(src))) {
-        src = src.substring(tok.raw.length);
-        tokens.push(tok);
-        continue;
-      }
-      if ((tok = this.delT(src, masked, lastChar))) {
-        src = src.substring(tok.raw.length);
-        tokens.push(tok);
-        continue;
-      }
-      if ((tok = this.autolinkT(src))) {
-        src = src.substring(tok.raw.length);
-        tokens.push(tok);
-        continue;
-      }
-      if (!this.inLink && (tok = this.urlT(src))) {
+      if (!this.inLink && this.urlPossible(src, c) && (tok = this.urlT(src))) {
         src = src.substring(tok.raw.length);
         tokens.push(tok);
         continue;
@@ -1062,13 +1073,27 @@ class Lexer {
 
   lastEmCloser(masked, ch) {
     const top = this.masks[this.masks.length - 1];
-    if (top && top.maskedSrc === masked) return top.em[ch];
+    if (top && top.maskedSrc === masked) {
+      if (top.em === null) {
+        const info = maskInfo(masked);
+        top.em = info.em;
+        top.del = info.del;
+      }
+      return top.em[ch];
+    }
     return maskInfo(masked).em[ch];
   }
 
   lastDelCloser(masked) {
     const top = this.masks[this.masks.length - 1];
-    if (top && top.maskedSrc === masked) return top.del;
+    if (top && top.maskedSrc === masked) {
+      if (top.em === null) {
+        const info = maskInfo(masked);
+        top.em = info.em;
+        top.del = info.del;
+      }
+      return top.del;
+    }
     return maskInfo(masked).del;
   }
 
@@ -1120,13 +1145,106 @@ class Lexer {
     return { type: 'link', raw: m[0], text, href, autolink: true, tokens: [{ type: 'text', raw: text, text }] };
   }
 
+  urlPossible(src, c) {
+    if (c === 104 || c === 72 || c === 102 || c === 70 || c === 119 || c === 87) return true;
+    if ((c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 46 || c === 95 || c === 43 || c === 45) {
+      return src.indexOf('@') !== -1;
+    }
+    return false;
+  }
+
   textT(src) {
-    const m = INLINE.text.exec(src);
-    if (!m) return;
-    const raw = m[0];
+    const len = scanTextLength(src);
+    if (len === 0) return;
+    const raw = len === src.length ? src : src.slice(0, len);
     const escaped = this.inRawBlock;
     return { type: 'text', raw, text: escaped ? raw : unescapeNumeric(raw), escaped };
   }
+}
+
+function isAlnumCode(c) {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
+
+function isTextWhitespace(s, i) {
+  const c = s.charCodeAt(i);
+  if (c < 128) return c === 32 || c === 9 || c === 10 || c === 11 || c === 12 || c === 13;
+  return PREV_WS.test(s.charAt(i));
+}
+
+/**
+ * Length of the next inline-text token, reproducing marked's text rule:
+ * a plain run that ends before a construct, a protocol/www/email trigger or
+ * a hard line break.
+ */
+function scanTextLength(src) {
+  const len = src.length;
+  if (len === 0) return 0;
+  const c0 = src.charCodeAt(0);
+  if (!isAlnumCode(c0) && (src.startsWith('mailto:', 1) || src.startsWith('xmpp:', 1))) return 1;
+
+  let q = 1;
+  if (c0 === 96 || c0 === 126) while (q < len && src.charCodeAt(q) === c0) q++;
+  const p0 = q;
+  let prevEmail = false;
+
+  while (q < len) {
+    const c = src.charCodeAt(q);
+    const f = c < 128 ? SCAN[c] : 8;
+    if (f === 16) {
+      // A plain alphanumeric character can only end the run by starting an
+      // e-mail address right after a non-address character.
+      if (!prevEmail && emailRunBeforeAt(src, q, len)) return q;
+      prevEmail = true;
+      q++;
+      continue;
+    }
+    if (f & 1) return q;
+    if (f & 4) {
+      if (c === 104 || c === 72) {
+        if (q + 3 < len && (src.charCodeAt(q + 1) | 32) === 116 && (src.charCodeAt(q + 2) | 32) === 116 && (src.charCodeAt(q + 3) | 32) === 112) return q;
+      } else if (c === 102 || c === 70) {
+        if (q + 5 < len && (src.charCodeAt(q + 1) | 32) === 116 && (src.charCodeAt(q + 2) | 32) === 112 && src.charCodeAt(q + 3) === 58 && src.charCodeAt(q + 4) === 47 && src.charCodeAt(q + 5) === 47) return q;
+      } else if (q + 3 < len && src.charCodeAt(q + 1) === 119 && src.charCodeAt(q + 2) === 119 && src.charCodeAt(q + 3) === 46) {
+        const p = src.charCodeAt(q - 1);
+        if (p === 32 || p === 9 || p === 10 || p === 11 || p === 12 || p === 13 || p === 42 || p === 95 || p === 126 || p === 40) return q;
+        if (p >= 128 && PREV_WS.test(src.charAt(q - 1))) return q;
+      }
+      if (!prevEmail && emailRunBeforeAt(src, q, len)) return q;
+      prevEmail = true;
+      q++;
+      continue;
+    }
+    if (f & 2) {
+      let k = q;
+      while (k < len && src.charCodeAt(k) === 32) k++;
+      if (k - q >= 2 && k < len && src.charCodeAt(k) === 10 && (q === p0 || src.charCodeAt(q - 1) !== 32)) return q;
+      if (q + 1 < len) {
+        const d = src.charCodeAt(q + 1);
+        if (d === 109 ? src.startsWith('mailto:', q + 1) : d === 120 && src.startsWith('xmpp:', q + 1)) return q + 1;
+      }
+      prevEmail = false;
+      q++;
+      continue;
+    }
+    // Any other non-alphanumeric character: a mailto:/xmpp: right after it
+    // ends the run, and an e-mail address may start at it.
+    if (q + 1 < len) {
+      const d = src.charCodeAt(q + 1);
+      if (d === 109 ? src.startsWith('mailto:', q + 1) : d === 120 && src.startsWith('xmpp:', q + 1)) return q + 1;
+    }
+    if ((f & 16) !== 0 && !prevEmail && emailRunBeforeAt(src, q, len)) return q;
+    prevEmail = (f & 16) !== 0;
+    q++;
+  }
+  return len;
+}
+
+/** True when an email address (address chars followed by '@') starts at i. */
+function emailRunBeforeAt(src, i, len) {
+  let k = i;
+  while (k < len && src.charCodeAt(k) < 128 && EMAIL_CHAR[src.charCodeAt(k)] === 1) k++;
+  return k > i && k < len && src.charCodeAt(k) === 64;
 }
 
 /** Index of the last delimiter run preceded by a non-space, as marked masks it. */
@@ -1158,6 +1276,106 @@ function stripIndent(fenceRaw, text) {
     if (lead === null) return line;
     return line.slice(Math.min(lead[0].length, prefix.length));
   }).join('\n');
+}
+
+/** Number of leading spaces/tabs on a line. */
+function leadingWhitespace(line) {
+  let i = 0;
+  while (i < line.length) {
+    const c = line.charCodeAt(i);
+    if (c !== 32 && c !== 9) break;
+    i++;
+  }
+  return i;
+}
+
+function hasTabBefore(line, lead) {
+  for (let i = 0; i < lead; i++) if (line.charCodeAt(i) === 9) return true;
+  return false;
+}
+
+/** Width of the expanded leading whitespace run. */
+function expandedWidth(line, lead) {
+  let col = 0;
+  for (let i = 0; i < lead; i++) {
+    if (line.charCodeAt(i) === 9) col += 4 - (col % 4);
+    else col++;
+  }
+  return col;
+}
+
+function isSpaceCode(c) {
+  return c === 32 || c === 9 || c === 10 || c === 11 || c === 12 || c === 13;
+}
+
+/** True when the line is a thematic break made of `ch`. */
+function isHrLine(line, start, ch) {
+  let count = 0;
+  for (let i = start; i < line.length; i++) {
+    const c = line.charCodeAt(i);
+    if (c === ch) count++;
+    else if (c !== 32 && c !== 9) return false;
+  }
+  return count >= 3;
+}
+
+/** Bullet / ordered-item marker followed by a space, tab or end of line. */
+function isListItemStart(line, sp) {
+  const c = line.charCodeAt(sp);
+  if (c === 42 || c === 43 || c === 45) {
+    return sp + 1 === line.length || line.charCodeAt(sp + 1) === 32 || line.charCodeAt(sp + 1) === 9;
+  }
+  if (c >= 48 && c <= 57) {
+    let k = sp;
+    while (k < line.length && k - sp < 9) {
+      const d = line.charCodeAt(k);
+      if (d < 48 || d > 57) break;
+      k++;
+    }
+    if (k === sp) return false;
+    const p = line.charCodeAt(k);
+    if (p !== 46 && p !== 41) return false;
+    const after = k + 1;
+    return after === line.length || line.charCodeAt(after) === 32 || line.charCodeAt(after) === 9;
+  }
+  return false;
+}
+
+/** Any block start that ends a list item's continuation line. */
+function startsBlockAt(line, n, htmlRe) {
+  let sp = 0;
+  while (sp < line.length && line.charCodeAt(sp) === 32) sp++;
+  if (sp > n) return false;
+  const c = line.charCodeAt(sp);
+  if (c === 96 || c === 126) return line.charCodeAt(sp + 1) === c && line.charCodeAt(sp + 2) === c;
+  if (c === 35) {
+    let k = sp;
+    while (k < line.length && line.charCodeAt(k) === 35) k++;
+    return k - sp <= 6 && (k === line.length || isSpaceCode(line.charCodeAt(k)));
+  }
+  if (c === 62) return true;
+  if (c === 60) return htmlRe.test(line);
+  if (c === 42 || c === 43 || c === 45) return isListItemStart(line, sp) || isHrLine(line, sp, c);
+  if (c === 95) return isHrLine(line, sp, 95);
+  if (c >= 48 && c <= 57) return isListItemStart(line, sp);
+  return false;
+}
+
+/** Block starts that abort a lazy continuation line in list items. */
+function startsContentAt(line, n, htmlRe) {
+  let sp = 0;
+  while (sp < line.length && line.charCodeAt(sp) === 32) sp++;
+  if (sp > n) return false;
+  const c = line.charCodeAt(sp);
+  if (c === 96 || c === 126) return line.charCodeAt(sp + 1) === c && line.charCodeAt(sp + 2) === c;
+  if (c === 35) {
+    let k = sp;
+    while (k < line.length && line.charCodeAt(k) === 35) k++;
+    return k - sp <= 6 && (k === line.length || isSpaceCode(line.charCodeAt(k)));
+  }
+  if (c === 60) return htmlRe.test(line);
+  if (c === 42 || c === 45 || c === 95) return isHrLine(line, sp, c);
+  return false;
 }
 
 /** Split a GFM table row into trimmed cells. */
@@ -1326,4 +1544,4 @@ export function parse(markdown) {
   const tokens = lexer.lex(markdown);
   return new Renderer().parse(tokens);
 }
-export { Lexer };
+export { Lexer, Renderer };
