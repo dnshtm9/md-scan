@@ -264,7 +264,18 @@ class Lexer {
     for (let i = 0; i < this.queue.length; i++) {
       const q = this.queue[i];
       this.inRawBlock = false;
-      this.inlineTokens(q.src, q.tokens);
+      // A task-list checkbox is the only token ever placed in the array before
+      // it is scanned (list() unshifts it and strips the marker from the src).
+      const pre = q.tokens;
+      let prefix = '';
+      for (let j = 0; j < pre.length; j++) {
+        if (pre[j].type === 'checkbox') {
+          prefix += '<input ' + (pre[j].checked ? 'checked="" ' : '') + 'disabled="" type="checkbox"> ';
+        }
+      }
+      const html = prefix + this.inlineRender(q.src).html;
+      pre.length = 0;
+      pre.push({ type: 'html', text: html });
     }
     this.queue = [];
     return tokens;
@@ -407,7 +418,7 @@ class Lexer {
     let crossedBlank = false;
     while (pos < whole.length) {
       let emptyStart = false;
-      const parts = [];
+      let text = '';
       const rest = whole.slice(pos);
       const m = itemRe.exec(rest);
       if (!m || BLOCK.hr.test(rest)) break;
@@ -428,7 +439,7 @@ class Lexer {
       } else {
         indent = content.search(/[^ ]/);
         indent = indent > 4 ? 1 : indent;
-        parts.push(content.slice(indent));
+        text = content.slice(indent);
         indent += markerLen;
       }
       if (blankFirst && /^[ \t]*$/.test(nextLine)) {
@@ -458,7 +469,7 @@ class Lexer {
           if (startsBlockAt(line, n, htmlRe)) break;
           const width = blank ? expanded.length : tabAt >= 0 ? expandedWidth(line, lead) : lead;
           if (width >= indent || blank) {
-            parts.push('\n' + expanded.slice(indent));
+            text += '\n' + expanded.slice(indent);
           } else {
             if (
               blankFirst ||
@@ -467,14 +478,13 @@ class Lexer {
             ) break;
             const setext = !/^ {0,3}(?:=+|-+) *$/.test(line) ? line
               : GF_BLOCK.lheading.test(content + '\n' + line) ? '    ' + expanded.replace(/^ {0,3}/, '') : line;
-            parts.push('\n' + setext);
+            text += '\n' + setext;
           }
           blankFirst = blank;
           pos = nl < whole.length ? nl + 1 : whole.length;
           content = expanded.slice(indent);
         }
       }
-      const text = parts.join('');
       const itemRaw = whole.slice(begin, pos);
       if (!list.loose) {
         if (crossedBlank) list.loose = true;
@@ -770,24 +780,29 @@ class Lexer {
     return tokens;
   }
 
-  /* ---------------- inline tokenizer ---------------- */
+  /* ---------------- inline scanner/renderer ---------------- */
 
-  inlineTokens(src, tokens = []) {
+  /** Scan one inline source, returning its { html, plain } projections.
+   *  `needPlain` is false when the caller only renders HTML, so the plain
+   *  projection is not accumulated (except where an image alt text needs it). */
+  inlineRender(src, needPlain = false) {
     const savedParen = this.linkParenPossible;
+    const savedNeed = this.needPlain;
     this.linkParenPossible = savedParen && src.includes(')');
-    try {
-      return this.inlineCore(src, tokens);
-    } finally {
-      this.linkParenPossible = savedParen;
-    }
-  }
-
-  inlineCore(src, tokens) {
+    this.needPlain = needPlain;
+    const hasAt = src.includes('@');
     // Only a source that can contain an emphasis/strike delimiter needs the
     // mask; everything else can go straight to the loop. The mask itself is
     // built on first use, since the delimiter may sit inside a construct that
     // is tokenised before it.
-    if (!(src.includes('*') || src.includes('_') || src.includes('~'))) return this.inlineLoop(src, null, tokens);
+    if (!(src.includes('*') || src.includes('_') || src.includes('~'))) {
+      try {
+        return this.inlineScan(src, null, hasAt);
+      } finally {
+        this.linkParenPossible = savedParen;
+        this.needPlain = savedNeed;
+      }
+    }
     const mask = {
       full: src,
       masked: null,
@@ -796,9 +811,11 @@ class Lexer {
     };
     this.masks.push({ maskedSrc: null, em: null, del: -1 });
     try {
-      return this.inlineLoop(src, mask, tokens);
+      return this.inlineScan(src, mask, hasAt);
     } finally {
       this.masks.pop();
+      this.linkParenPossible = savedParen;
+      this.needPlain = savedNeed;
     }
   }
 
@@ -859,7 +876,10 @@ class Lexer {
     return false;
   }
 
-  inlineLoop(src, mask, tokens) {
+  inlineScan(src, mask, hasAt) {
+    let html = '';
+    let plain = '';
+    const needPlain = this.needPlain;
     let wasText = false;
     let lastChar = '';
     let marker = Infinity;
@@ -878,42 +898,29 @@ class Lexer {
       } else if (c === 60) {
         tok = this.tagT(src) || this.autolinkT(src);
       } else if (c === 91 || c === 33) {
-        tok = this.linkT(src);
-        if (tok) {
-          src = src.substring(tok.raw.length);
-          tokens.push(tok);
-          continue;
-        }
-        tok = this.reflinkT(src);
-        if (tok) {
-          src = src.substring(tok.raw.length);
-          const prev = tokens[tokens.length - 1];
-          if (tok.type === 'text' && prev && prev.type === 'text') {
-            prev.raw += tok.raw;
-            prev.text += tok.text;
-          } else tokens.push(tok);
-          continue;
-        }
+        tok = this.linkT(src) || this.reflinkT(src);
       } else if (c === 42 || c === 95) {
-        tok = this.emStrongT(src, this.maskOf(mask), lastChar);
+        tok = this.emStrongT(src, mask, lastChar);
       } else if (c === 96) {
         tok = this.codespanT(src);
       } else if (c === 126) {
-        tok = this.delT(src, this.maskOf(mask), lastChar);
+        tok = this.delT(src, mask, lastChar);
       } else if (c === 32) {
         tok = this.brT(src);
       }
       if (tok) {
         src = src.substring(tok.raw.length);
-        tokens.push(tok);
+        html += tok.html;
+        if (needPlain) plain += tok.plain;
         continue;
       }
       if (!this.inLink && this.urlPossible(src, c) && (tok = this.urlT(src))) {
         src = src.substring(tok.raw.length);
-        tokens.push(tok);
+        html += tok.html;
+        if (needPlain) plain += tok.plain;
         continue;
       }
-      const n = scanTextLength(src);
+      const n = scanTextLength(src, hasAt);
       if (n > 0) {
         const raw = n === src.length ? src : src.slice(0, n);
         const escaped = this.inRawBlock;
@@ -922,21 +929,18 @@ class Lexer {
         src = src.substring(n);
         if (last !== 95) lastChar = raw.charAt(raw.length - 1);
         wasText = true;
-        const prev = tokens[tokens.length - 1];
-        if (prev !== undefined && prev.type === 'text') {
-          prev.raw += raw;
-          prev.text += text;
-        } else tokens.push({ type: 'text', raw, text, escaped });
+        html += escaped ? text : esc(text);
+        if (needPlain) plain += text;
         continue;
       }
       throw new Error('Infinite loop on byte: ' + src.charCodeAt(0));
     }
-    return tokens;
+    return { html, plain };
   }
 
   escapeT(src) {
     const m = INLINE.escape.exec(src);
-    if (m) return { type: 'escape', raw: m[0], text: m[1] };
+    if (m) return { raw: m[0], html: esc(m[1]), plain: m[1] };
   }
 
   tagT(src) {
@@ -946,14 +950,7 @@ class Lexer {
     else if (this.inLink && /^<\/a>/i.test(m[0])) this.inLink = false;
     if (!this.inRawBlock && /^<(pre|code|kbd|script)(\s|>)/i.test(m[0])) this.inRawBlock = true;
     else if (this.inRawBlock && /^<\/(pre|code|kbd|script)(\s|>)/i.test(m[0])) this.inRawBlock = false;
-    return {
-      type: 'html',
-      raw: m[0],
-      inLink: this.inLink,
-      inRawBlock: this.inRawBlock,
-      block: false,
-      text: m[0],
-    };
+    return { raw: m[0], html: m[0], plain: m[0] };
   }
 
   linkT(src) {
@@ -1017,7 +1014,8 @@ class Lexer {
     const savedRaw = this.inRawBlock;
     this.inLink = true;
     this.linkEmitted = false;
-    const children = this.inlineTokens(text);
+    // An image's alt text always needs the plain projection of its label.
+    const inner = this.inlineRender(text, this.needPlain || isImage);
     const emitted = this.linkEmitted;
     this.linkEmitted = savedEmitted;
     this.inLink = savedInLink;
@@ -1028,14 +1026,24 @@ class Lexer {
       }
       this.linkEmitted = true;
     }
-    return {
-      type: isImage ? 'image' : 'link',
-      raw,
-      href: link.href,
-      title: link.title || null,
-      text,
-      tokens: children,
-    };
+    const encoded = encodeHref(link.href);
+    let html;
+    if (isImage) {
+      const alt = inner.plain;
+      if (encoded === null) html = esc(alt);
+      else {
+        html = '<img src="' + esc(encoded) + '" alt="' + esc(alt) + '"';
+        if (link.title) html += ' title="' + esc(link.title) + '"';
+        html += '>';
+      }
+    } else if (encoded === null) {
+      html = inner.html;
+    } else {
+      html = '<a href="' + esc(encoded) + '"';
+      if (link.title) html += ' title="' + esc(link.title) + '"';
+      html += '>' + inner.html + '</a>';
+    }
+    return { raw, html, plain: this.needPlain ? inner.plain : '' };
   }
 
   reflinkT(src) {
@@ -1046,14 +1054,16 @@ class Lexer {
     const link = this.links[normalizeLabel(m[2] || m[1])];
     if (!link) {
       const c = m[0].charAt(0);
-      return { type: 'text', raw: c, text: c };
+      return { raw: c, html: esc(c), plain: c };
     }
     return this.makeLink(m[1], link, m[0]);
   }
 
-  emStrongT(src, masked, startText) {
+  emStrongT(src, mask, startText) {
     let m = INLINE.emStrongLDelim.exec(src);
     if (!m || (!m[1] && !m[2] && !m[3] && !m[4])) return;
+    // The mask is only consulted once this run can actually open emphasis.
+    const masked = this.maskOf(mask);
     const ch = m[0][0];
     const sameStart = startText === ch;
     const offset = masked.length - src.length;
@@ -1102,19 +1112,20 @@ class Lexer {
         const lead = firstCpLen(hit[0]);
         const raw = src.slice(0, runLen + hit.index + lead + len);
         if (Math.min(runLen, len) % 2) {
-          const body = raw.slice(1, -1);
-          return { type: 'em', raw, text: body, tokens: this.inlineTokens(body) };
+          const inner = this.inlineRender(raw.slice(1, -1), this.needPlain);
+          return { raw, html: '<em>' + inner.html + '</em>', plain: this.needPlain ? inner.plain : '' };
         }
-        const body = raw.slice(2, -2);
-        return { type: 'strong', raw, text: body, tokens: this.inlineTokens(body) };
+        const inner = this.inlineRender(raw.slice(2, -2), this.needPlain);
+        return { raw, html: '<strong>' + inner.html + '</strong>', plain: this.needPlain ? inner.plain : '' };
       }
     }
   }
 
-  delT(src, masked, startText) {
+  delT(src, mask, startText) {
     const m = INLINE.delLDelim.exec(src);
     if (!m) return;
     if (!(m[1] || '') || !startText || PUNCT.test(startText)) {
+      const masked = this.maskOf(mask);
       const runLen = runLenCp(m[0]);
       const lastDel = this.lastDelCloser(masked);
       const base = masked.length - src.length + runLen;
@@ -1139,8 +1150,8 @@ class Lexer {
         len = Math.min(len, len + balance);
         const lead = firstCpLen(hit[0]);
         const raw = src.slice(0, runLen + hit.index + lead + len);
-        const body = raw.slice(runLen, -runLen);
-        return { type: 'del', raw, text: body, tokens: this.inlineTokens(body) };
+        const inner = this.inlineRender(raw.slice(runLen, -runLen), this.needPlain);
+        return { raw, html: '<del>' + inner.html + '</del>', plain: this.needPlain ? inner.plain : '' };
       }
     }
   }
@@ -1177,12 +1188,12 @@ class Lexer {
     let text = m[2].replace(/\n/g, ' ');
     const hasText = /[^ ]/.test(text);
     if (hasText && /^ /.test(text) && / $/.test(text)) text = text.substring(1, text.length - 1);
-    return { type: 'codespan', raw: m[0], text };
+    return { raw: m[0], html: '<code>' + esc(text, true) + '</code>', plain: text };
   }
 
   brT(src) {
     const m = INLINE.br.exec(src);
-    if (m) return { type: 'br', raw: m[0] };
+    if (m) return { raw: m[0], html: '<br>', plain: '' };
   }
 
   autolinkT(src) {
@@ -1196,7 +1207,13 @@ class Lexer {
       text = m[1];
       href = text;
     }
-    return { type: 'link', raw: m[0], text, href, autolink: true, tokens: [{ type: 'text', raw: text, text }] };
+    const encoded = encodeHref(href);
+    const label = esc(text, true);
+    return {
+      raw: m[0],
+      html: encoded === null ? label : '<a href="' + esc(encoded, true) + '">' + label + '</a>',
+      plain: text,
+    };
   }
 
   urlT(src) {
@@ -1216,7 +1233,13 @@ class Lexer {
       text = m[0];
       href = m[1] === 'www.' ? 'http://' + text : text;
     }
-    return { type: 'link', raw: m[0], text, href, autolink: true, tokens: [{ type: 'text', raw: text, text }] };
+    const encoded = encodeHref(href);
+    const label = esc(text, true);
+    return {
+      raw: m[0],
+      html: encoded === null ? label : '<a href="' + esc(encoded, true) + '">' + label + '</a>',
+      plain: text,
+    };
   }
 
   urlPossible(src, c) {
@@ -1253,11 +1276,14 @@ function isAlnumCode(c) {
  * a plain run that ends before a construct, a protocol/www/email trigger or
  * a hard line break.
  */
-function scanTextLength(src) {
+function scanTextLength(src, hasAt) {
   const len = src.length;
   if (len === 0) return 0;
   const c0 = src.charCodeAt(0);
-  if (!isAlnumCode(c0) && (src.startsWith('mailto:', 1) || src.startsWith('xmpp:', 1))) return 1;
+  if (!isAlnumCode(c0)) {
+    const d = src.charCodeAt(1);
+    if (d === 109 ? src.startsWith('mailto:', 1) : d === 120 && src.startsWith('xmpp:', 1)) return 1;
+  }
 
   let q = 1;
   if (c0 === 96 || c0 === 126) while (q < len && src.charCodeAt(q) === c0) q++;
@@ -1270,7 +1296,7 @@ function scanTextLength(src) {
     if (f === 16) {
       // A plain alphanumeric character can only end the run by starting an
       // e-mail address right after a non-address character.
-      if (!prevEmail && emailRunBeforeAt(src, q, len)) return q;
+      if (hasAt && !prevEmail && emailRunBeforeAt(src, q, len)) return q;
       prevEmail = true;
       q++;
       continue;
@@ -1286,7 +1312,7 @@ function scanTextLength(src) {
         if (p === 32 || p === 9 || p === 10 || p === 11 || p === 12 || p === 13 || p === 42 || p === 95 || p === 126 || p === 40) return q;
         if (p >= 128 && PREV_WS.test(src.charAt(q - 1))) return q;
       }
-      if (!prevEmail && emailRunBeforeAt(src, q, len)) return q;
+      if (hasAt && !prevEmail && emailRunBeforeAt(src, q, len)) return q;
       prevEmail = true;
       q++;
       continue;
@@ -1309,7 +1335,7 @@ function scanTextLength(src) {
       const d = src.charCodeAt(q + 1);
       if (d === 109 ? src.startsWith('mailto:', q + 1) : d === 120 && src.startsWith('xmpp:', q + 1)) return q + 1;
     }
-    if ((f & 16) !== 0 && !prevEmail && emailRunBeforeAt(src, q, len)) return q;
+    if (hasAt && (f & 16) !== 0 && !prevEmail && emailRunBeforeAt(src, q, len)) return q;
     prevEmail = (f & 16) !== 0;
     q++;
   }
