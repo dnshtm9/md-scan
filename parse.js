@@ -37,21 +37,11 @@ function unescapeNumeric(s) {
   });
 }
 
-const HREF_SAFE = new Uint8Array(128);
-for (const ch of "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789;,.!~*'()-_$/?:@&=+#") {
-  HREF_SAFE[ch.charCodeAt(0)] = 1;
-}
+const HREF_UNSAFE = /[^ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789;,.!~*'()\-_$/?:@&=+#]/;
 
 /** Percent-encode an href; null when encodeURI rejects it. */
 function encodeHref(s) {
-  const len = s.length;
-  let i = 0;
-  while (i < len) {
-    const c = s.charCodeAt(i);
-    if (c >= 128 || HREF_SAFE[c] === 0) break;
-    i++;
-  }
-  if (i === len) return s;
+  if (!HREF_UNSAFE.test(s)) return s;
   try {
     return encodeURI(s).replace(/%25/g, '%');
   } catch {
