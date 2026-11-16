@@ -255,7 +255,7 @@ class Lexer {
     this.inLink = false;
     this.inRawBlock = false;
     this.linkEmitted = false;
-    this.linkParenPossible = true;
+    this.linkParenPossible = null;
     this.atPossible = true;
     this.links = Object.create(null);
     this.linkCount = 0;
@@ -805,7 +805,9 @@ class Lexer {
     const savedFrame = this.maskFrame;
     // Nested renders always scan a substring of the enclosing source, so a
     // parent without "@" (or ")") settles the child without a rescan.
-    this.linkParenPossible = savedParen && src.includes(')');
+    // Whether a link's ")" exists is only needed once a "[" is seen; null
+    // means "not checked yet". A parent without ")" settles it for children.
+    this.linkParenPossible = savedParen === false ? false : null;
     this.atPossible = savedAt && src.includes('@');
     this.needPlain = needPlain;
     this.maskFrame = null;
@@ -958,6 +960,8 @@ class Lexer {
   }
 
   linkT(src) {
+    if (this.linkParenPossible === false) return;
+    if (this.linkParenPossible === null) this.linkParenPossible = src.includes(')');
     if (!this.linkParenPossible) return;
     const m = INLINE.link.exec(src);
     if (!m) return;
