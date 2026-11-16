@@ -828,7 +828,7 @@ class Lexer {
     if (frame === null) {
       // The mask only rewrites code spans, link text, tags and escapes.
       const needed = src.includes('`') || src.includes('[') || src.includes('<') || src.includes('\\');
-      frame = this.maskFrame = { masked: needed ? this.buildMask(src) : src, em: null, del: -1 };
+      frame = this.maskFrame = { masked: needed ? this.buildMask(src) : src, star: undefined, und: undefined, del: undefined };
     }
     return frame.masked;
   }
@@ -1163,27 +1163,21 @@ class Lexer {
   lastEmCloser(masked, ch) {
     const frame = this.maskFrame;
     if (frame && frame.masked === masked) {
-      if (frame.em === null) {
-        const info = maskInfo(masked);
-        frame.em = info.em;
-        frame.del = info.del;
-      }
-      return frame.em[ch];
+      const key = ch === '*' ? 'star' : 'und';
+      let v = frame[key];
+      if (v === undefined) v = frame[key] = lastDelim(masked, ch);
+      return v;
     }
-    return maskInfo(masked).em[ch];
+    return lastDelim(masked, ch);
   }
 
   lastDelCloser(masked) {
     const frame = this.maskFrame;
     if (frame && frame.masked === masked) {
-      if (frame.em === null) {
-        const info = maskInfo(masked);
-        frame.em = info.em;
-        frame.del = info.del;
-      }
+      if (frame.del === undefined) frame.del = lastDelim(masked, '~');
       return frame.del;
     }
-    return maskInfo(masked).del;
+    return lastDelim(masked, '~');
   }
 
   codespanT(src) {
@@ -1357,24 +1351,18 @@ function emailRunBeforeAt(src, i, len) {
   return k > i && k < len && src.charCodeAt(k) === 64;
 }
 
-/** Index of the last delimiter run preceded by a non-space, as marked masks it. */
-function maskInfo(masked) {
-  const em = { '*': -1, '_': -1 };
-  let del = -1;
-  const n = masked.length;
-  for (let i = 0; i < n; i++) {
-    const c = masked.charCodeAt(i);
-    if (c !== 42 && c !== 95 && c !== 126) continue;
-    const prev = i === 0 ? 10 : masked.charCodeAt(i - 1);
-    let j = i + 1;
-    while (j < n && masked.charCodeAt(j) === c) j++;
-    if (prev !== 32 && prev !== 9 && prev !== 10 && prev !== 13 && prev !== 12) {
-      if (c === 126) del = i;
-      else em[c === 42 ? '*' : '_'] = i;
-    }
-    i = j - 1;
+/** Index of the last run of `ch` preceded by a non-space, as marked masks it. */
+function lastDelim(masked, ch) {
+  let i = masked.lastIndexOf(ch);
+  while (i >= 0) {
+    let s = i;
+    while (s > 0 && masked.charCodeAt(s - 1) === ch.charCodeAt(0)) s--;
+    const prev = s === 0 ? 10 : masked.charCodeAt(s - 1);
+    if (prev !== 32 && prev !== 9 && prev !== 10 && prev !== 13 && prev !== 12) return s;
+    if (s === 0) break;
+    i = masked.lastIndexOf(ch, s - 1);
   }
-  return { maskedSrc: masked, em, del };
+  return -1;
 }
 
 /** Length in code units of the first code point of s (s must be non-empty). */

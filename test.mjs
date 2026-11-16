@@ -64,6 +64,9 @@ const regressions = [
   // The text run ends on a mailto: trigger; the trigger's preceding escape
   // character is still part of the run and must be escaped.
   ['*>mailto:', '<p>*&gt;mailto:</p>\n'],
+  // A delimiter at the very start of a mask is not a closer (marked treats
+  // the implicit preceding character as a newline); this once looped forever.
+  ['*foo`*`', '<p>*foo<code>*</code></p>\n'],
 ];
 let regPass = 0;
 for (const [md, want] of regressions) {
