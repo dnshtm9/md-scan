@@ -755,17 +755,34 @@ class Lexer {
   }
 
   inlineCore(src, tokens) {
-    let masked = src;
-    if (src.includes('*') || src.includes('_') || src.includes('~')) {
+    // Only a source that can contain an emphasis/strike delimiter needs the
+    // mask; everything else can go straight to the loop. The mask itself is
+    // built on first use, since the delimiter may sit inside a construct that
+    // is tokenised before it.
+    if (!(src.includes('*') || src.includes('_') || src.includes('~'))) return this.inlineLoop(src, null, tokens);
+    const mask = {
+      full: src,
+      masked: null,
       // The mask only rewrites code spans, link text, tags and escapes.
-      if (src.includes('`') || src.includes('[') || src.includes('<') || src.includes('\\')) masked = this.buildMask(src);
-    }
-    this.masks.push({ maskedSrc: masked, em: null, del: -1 });
+      needed: src.includes('`') || src.includes('[') || src.includes('<') || src.includes('\\'),
+    };
+    this.masks.push({ maskedSrc: null, em: null, del: -1 });
     try {
-      return this.inlineLoop(src, masked, tokens);
+      return this.inlineLoop(src, mask, tokens);
     } finally {
       this.masks.pop();
     }
+  }
+
+  /** The mask of a whole inline source, computed at most once. */
+  maskOf(mask) {
+    let masked = mask.masked;
+    if (masked === null) {
+      masked = mask.needed ? this.buildMask(mask.full) : mask.full;
+      mask.masked = masked;
+      this.masks[this.masks.length - 1].maskedSrc = masked;
+    }
+    return masked;
   }
 
   buildMask(src) {
@@ -814,7 +831,7 @@ class Lexer {
     return false;
   }
 
-  inlineLoop(src, masked, tokens) {
+  inlineLoop(src, mask, tokens) {
     let wasText = false;
     let lastChar = '';
     let marker = Infinity;
@@ -850,11 +867,11 @@ class Lexer {
           continue;
         }
       } else if (c === 42 || c === 95) {
-        tok = this.emStrongT(src, masked, lastChar);
+        tok = this.emStrongT(src, this.maskOf(mask), lastChar);
       } else if (c === 96) {
         tok = this.codespanT(src);
       } else if (c === 126) {
-        tok = this.delT(src, masked, lastChar);
+        tok = this.delT(src, this.maskOf(mask), lastChar);
       } else if (c === 32) {
         tok = this.brT(src);
       }
