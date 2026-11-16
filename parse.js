@@ -20,9 +20,9 @@ const NUMERIC_REF_ALL = /&#(?:(\d{1,7})|[Xx]([A-Fa-f0-9]{1,6}));|&(?!(#\d{1,7}|#
 
 /** HTML-escape like marked's escape(html, encode). */
 function esc(s, encode) {
-  // A replace that finds nothing returns the input string itself, so the
-  // "is anything there to escape" test can be left to the replace.
-  return encode ? s.replace(ESCAPE_ALL, entityOf) : s.replace(ESCAPE_SAFE, entityOf);
+  // Most text needs no escaping at all; a quick test avoids the replace.
+  if (encode) return ESCAPE_TEST.test(s) ? s.replace(ESCAPE_ALL, entityOf) : s;
+  return ESCAPE_TEST_SAFE.test(s) ? s.replace(ESCAPE_SAFE, entityOf) : s;
 }
 
 /** Decode numeric character references in a text token, as marked does. */
@@ -397,7 +397,9 @@ class Lexer {
       if (!m || BLOCK.hr.test(rest)) break;
       const begin = pos;
       pos += m[0].length;
-      const firstLine = m[2].split('\n', 1)[0];
+      const m2 = m[2];
+      const nl0 = m2.indexOf('\n');
+      const firstLine = nl0 < 0 ? m2 : m2.slice(0, nl0);
       const markerLen = m[1].length;
       let content = firstLine.replace(/^[ \t]+/, (ws) => expandTabs(ws, markerLen));
       let nl = whole.indexOf('\n', pos);
@@ -424,11 +426,21 @@ class Lexer {
           nl = whole.indexOf('\n', pos);
           if (nl < 0) nl = whole.length;
           const line = whole.slice(pos, nl);
-          const lead = leadingWhitespace(line);
-          const blank = lead === line.length;
-          const expanded = hasTabBefore(line, lead) ? expandTabs(line.slice(0, lead)) + line.slice(lead) : line;
+          // Leading spaces/tabs, with the first tab position kept for the
+          // expansion decision, all in one pass.
+          let lead = 0;
+          let tabAt = -1;
+          const lineLen = line.length;
+          while (lead < lineLen) {
+            const ch = line.charCodeAt(lead);
+            if (ch === 32) lead++;
+            else if (ch === 9) { if (tabAt < 0) tabAt = lead; lead++; }
+            else break;
+          }
+          const blank = lead === lineLen;
+          const expanded = tabAt >= 0 ? expandTabs(line.slice(0, lead)) + line.slice(lead) : line;
           if (startsBlockAt(line, n, htmlRe)) break;
-          const width = blank ? expanded.length : expandedWidth(line, lead);
+          const width = blank ? expanded.length : tabAt >= 0 ? expandedWidth(line, lead) : lead;
           if (width >= indent || blank) {
             parts.push('\n' + expanded.slice(indent));
           } else {
@@ -1577,7 +1589,15 @@ class Renderer {
 
   inline(tokens, textMode = false) {
     let out = '';
-    for (let i = 0; i < tokens.length; i++) out += this.inlineToken(tokens[i], textMode);
+    for (let i = 0; i < tokens.length; i++) {
+      const tok = tokens[i];
+      // Plain text is by far the most common token; handle it without a call.
+      if (tok.type === 'text' && !textMode && tok.tokens === undefined) {
+        out += tok.escaped ? tok.text : esc(tok.text);
+        continue;
+      }
+      out += this.inlineToken(tok, textMode);
+    }
     return out;
   }
 
@@ -1647,4 +1667,3 @@ export function parse(markdown) {
   const tokens = lexer.lex(markdown);
   return new Renderer().parse(tokens);
 }
-export { Lexer, Renderer };
