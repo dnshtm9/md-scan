@@ -778,20 +778,20 @@ class Lexer {
           continue;
         }
       }
-      const tm = BLOCK.text.exec(src);
-      if (tm) {
-        const raw = tm[0];
-        const prev = tokens[tokens.length - 1];
-        if (prev && prev.type === 'text') {
-          prev.raw += (prev.raw.endsWith('\n') ? '' : '\n') + raw;
-          prev.text += '\n' + raw;
-          this.queue[this.queue.length - 1].src = prev.text;
-        } else {
-          tokens.push({ type: 'text', raw, text: raw, tokens: this.inline(raw) });
-        }
-        src = src.substring(raw.length);
-        continue;
+      // BLOCK.text is /^[^\n]+/; the loop guarantees a non-empty source that
+      // does not start with a newline, so finding the line end is enough.
+      const eol = src.indexOf('\n');
+      const raw = eol < 0 ? src : src.slice(0, eol);
+      const prev = tokens[tokens.length - 1];
+      if (prev && prev.type === 'text') {
+        prev.raw += (prev.raw.endsWith('\n') ? '' : '\n') + raw;
+        prev.text += '\n' + raw;
+        this.queue[this.queue.length - 1].src = prev.text;
+      } else {
+        tokens.push({ type: 'text', raw, text: raw, tokens: this.inline(raw) });
       }
+      src = src.substring(raw.length);
+      continue;
       throw new Error('Infinite loop on byte: ' + src.charCodeAt(0));
     }
     this.top = true;
