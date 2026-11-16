@@ -124,7 +124,6 @@ const BLOCK = {
   def: /^ {0,3}\[((?!\s*\])(?:\\[\s\S]|[^\[\]\\\n]|\n(?![ \t]*\n))+)\]: *(?:\n[ \t]*)?([^<\s][^\s]*|<.*?>)(?:(?: +(?:\n[ \t]*)?| *\n[ \t]*)((?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\\n]|\n(?!\n))*'|\((?:\\[\s\S]|[^()\\])*\))))? *(?:\n+|$)/,
   table: /^ *([^\n ].*)\n {0,3}((?:\| *)?:?-+:? *(?:\| *:?-+:? *)*(?:\| *)?)(?:\n((?:(?! *\n| {0,3}((?:-[\t ]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})(?:\n+|$)| {0,3}#{1,6}(?:\s|$)| {0,3}>|(?: {4}| {0,3}	)[^\n]| {0,3}(?:`{3,}(?=[^`\n]*(?:\n|$))|~~~)[^\n]*(?:\n|$)| {0,3}(?:[*+-]|1[.)])[ \t]| {0,3}(?:<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|meta|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?: +|\n|\/?>)|<(?:(?:script|pre|style|textarea)(?:[\s>]|$)|!--)|<\?|<![A-Za-z]|<!\[CDATA\[)).*(?:\n|$))*)\n*|$)/,
   list: /^( {0,3}(?:[*+-]|\d{1,9}[.)]))([ \t][^\n]*?)?(?:\n|$)/,
-  text: /^[^\n]+/,
 };
 
 // BLOCK.hr without the leading anchor, for testing at a list cursor without
@@ -267,6 +266,7 @@ class Lexer {
     this.inRawBlock = false;
     this.linkEmitted = false;
     this.linkParenPossible = true;
+    this.atPossible = true;
     this.links = Object.create(null);
     this.linkCount = 0;
     this.queue = [];
@@ -810,12 +810,16 @@ class Lexer {
    *  projection is not accumulated (except where an image alt text needs it). */
   inlineRender(src, needPlain = false) {
     const savedParen = this.linkParenPossible;
+    const savedAt = this.atPossible;
     const savedNeed = this.needPlain;
     const savedFrame = this.maskFrame;
+    // Nested renders always scan a substring of the enclosing source, so a
+    // parent without "@" (or ")") settles the child without a rescan.
     this.linkParenPossible = savedParen && src.includes(')');
+    this.atPossible = savedAt && src.includes('@');
     this.needPlain = needPlain;
     this.maskFrame = null;
-    const hasAt = src.includes('@');
+    const hasAt = this.atPossible;
     // The mask frame is only created if a delimiter actually opens emphasis
     // or strikethrough, so sources without one never pay for it.
     try {
@@ -823,6 +827,7 @@ class Lexer {
     } finally {
       this.maskFrame = savedFrame;
       this.linkParenPossible = savedParen;
+      this.atPossible = savedAt;
       this.needPlain = savedNeed;
     }
   }
@@ -1265,14 +1270,6 @@ class Lexer {
       return i < len && src.charCodeAt(i) === 64;
     }
     return false;
-  }
-
-  textT(src) {
-    const len = scanTextLength(src);
-    if (len === 0) return;
-    const raw = len === src.length ? src : src.slice(0, len);
-    const escaped = this.inRawBlock;
-    return { type: 'text', raw, text: escaped ? raw : unescapeNumeric(raw), escaped };
   }
 }
 
