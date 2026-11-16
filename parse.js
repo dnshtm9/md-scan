@@ -1299,7 +1299,8 @@ function scanTextLength(src, hasAt) {
       q++;
       while (q < len) {
         const c2 = src.charCodeAt(q);
-        if (c2 >= 128 || SCAN[c2] !== 16) break;
+        // SCAN[c2] is undefined for c2 >= 128, which also breaks the run.
+        if (SCAN[c2] !== 16) break;
         q++;
       }
       prevEmail = true;
@@ -1322,10 +1323,11 @@ function scanTextLength(src, hasAt) {
       continue;
     }
     if (f & 2) {
-      let k = q;
+      // The character at q is a space, so the run scan starts after it.
+      let k = q + 1;
       while (k < len && src.charCodeAt(k) === 32) k++;
       if (k - q >= 2 && k < len && src.charCodeAt(k) === 10 && (q === p0 || src.charCodeAt(q - 1) !== 32)) return q;
-      if (q + 1 < len) {
+      if (k === q + 1 && q + 1 < len) {
         const d = src.charCodeAt(q + 1);
         if (d === 109 ? src.startsWith('mailto:', q + 1) : d === 120 && src.startsWith('xmpp:', q + 1)) return q + 1;
       }
