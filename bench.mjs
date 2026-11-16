@@ -28,12 +28,20 @@ run(parse);
 run(base);
 const mine = [];
 const baseT = [];
+let cpuMine = 0;
+let cpuBase = 0;
 for (let r = 0; r < 21; r++) {
+  let c0 = process.cpuUsage();
   const t0 = performance.now();
   run(parse);
   const t1 = performance.now();
+  let c1 = process.cpuUsage(c0);
+  cpuMine += (c1.user + c1.system) / 1000;
+  c0 = process.cpuUsage();
   run(base);
   const t2 = performance.now();
+  c1 = process.cpuUsage(c0);
+  cpuBase += (c1.user + c1.system) / 1000;
   mine.push(t1 - t0);
   baseT.push(t2 - t1);
 }
@@ -42,7 +50,9 @@ const stat = (xs) => {
   return { min: s[0], p25: s[s.length >> 2], med: s[(s.length - 1) >> 1] };
 };
 const ratios = mine.map((m, i) => baseT[i] / m).sort((a, b) => a - b);
+const sumMine = mine.reduce((a, b) => a + b, 0);
+const sumBase = baseT.reduce((a, b) => a + b, 0);
 console.log(`cases_passed ${same} / ${inputs.length}`);
 console.log(`wall mine     min ${stat(mine).min.toFixed(1)}  median ${stat(mine).med.toFixed(1)} ms`);
 console.log(`wall baseline min ${stat(baseT).min.toFixed(1)}  median ${stat(baseT).med.toFixed(1)} ms`);
-console.log(`speedup       median ${ratios[ratios.length >> 1].toFixed(2)}x  best ${ratios[ratios.length - 1].toFixed(2)}x  p25 ${ratios[ratios.length >> 2].toFixed(2)}x`);
+console.log(`speedup       median ${ratios[ratios.length >> 1].toFixed(2)}x  best ${ratios[ratios.length - 1].toFixed(2)}x  p25 ${ratios[ratios.length >> 2].toFixed(2)}x  totals ${(sumBase / sumMine).toFixed(2)}x  cpu ${(cpuBase / cpuMine).toFixed(2)}x`);

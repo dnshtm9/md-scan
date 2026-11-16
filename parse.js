@@ -20,10 +20,9 @@ const NUMERIC_REF_ALL = /&#(?:(\d{1,7})|[Xx]([A-Fa-f0-9]{1,6}));|&(?!(#\d{1,7}|#
 
 /** HTML-escape like marked's escape(html, encode). */
 function esc(s, encode) {
-  if (encode) {
-    return ESCAPE_TEST.test(s) ? s.replace(ESCAPE_ALL, entityOf) : s;
-  }
-  return ESCAPE_TEST_SAFE.test(s) ? s.replace(ESCAPE_SAFE, entityOf) : s;
+  // A replace that finds nothing returns the input string itself, so the
+  // "is anything there to escape" test can be left to the replace.
+  return encode ? s.replace(ESCAPE_ALL, entityOf) : s.replace(ESCAPE_SAFE, entityOf);
 }
 
 /** Decode numeric character references in a text token, as marked does. */
@@ -38,8 +37,21 @@ function unescapeNumeric(s) {
   });
 }
 
+const HREF_SAFE = new Uint8Array(128);
+for (const ch of "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789;,.!~*'()-_$/?:@&=+#") {
+  HREF_SAFE[ch.charCodeAt(0)] = 1;
+}
+
 /** Percent-encode an href; null when encodeURI rejects it. */
 function encodeHref(s) {
+  const len = s.length;
+  let i = 0;
+  while (i < len) {
+    const c = s.charCodeAt(i);
+    if (c >= 128 || HREF_SAFE[c] === 0) break;
+    i++;
+  }
+  if (i === len) return s;
   try {
     return encodeURI(s).replace(/%25/g, '%');
   } catch {
@@ -131,6 +143,10 @@ for (const ch of '\\<![`*~_') TEXT_STOP[ch.charCodeAt(0)] = 1;
 const EMAIL_CHAR = new Uint8Array(128);
 for (const ch of "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.!#$%&'*+/=?_`{|}~-") EMAIL_CHAR[ch.charCodeAt(0)] = 1;
 
+// Characters a bare autolink address may start with (the url rule's local part).
+const LOCAL_PART = new Uint8Array(128);
+for (const ch of 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-') LOCAL_PART[ch.charCodeAt(0)] = 1;
+
 // Per-character flags for the inline text scan:
 // 1 stops the run, 2 is a space, 4 starts a protocol, 8 is not alphanumeric,
 // 16 is an e-mail address character.
@@ -218,6 +234,7 @@ class Lexer {
     this.linkEmitted = false;
     this.linkParenPossible = true;
     this.links = Object.create(null);
+    this.linkCount = 0;
     this.queue = [];
     this.masks = [];
     this.itemRes = new Map();
@@ -433,7 +450,7 @@ class Lexer {
       const itemRaw = whole.slice(begin, pos);
       if (!list.loose) {
         if (crossedBlank) list.loose = true;
-        else if (/\n[ \t]*\n[ \t]*$/.test(itemRaw)) crossedBlank = true;
+        else if (endsWithBlankLine(itemRaw)) crossedBlank = true;
       }
       list.items.push({
         type: 'list_item',
@@ -671,7 +688,10 @@ class Lexer {
           prev.text += '\n' + tok.raw;
           this.queue[this.queue.length - 1].src = prev.text;
         } else {
-          if (!this.links[tok.tag]) this.links[tok.tag] = { href: tok.href, title: tok.title };
+          if (!this.links[tok.tag]) {
+            this.links[tok.tag] = { href: tok.href, title: tok.title };
+            this.linkCount++;
+          }
           tokens.push(tok);
         }
         continue;
@@ -750,13 +770,17 @@ class Lexer {
 
   buildMask(src) {
     let t = src;
-    if (src.includes('[')) t = this.maskReflinks(t);
-    t = t.replace(INLINE.anyPunctuationOutsideCode, (all, ticks, punct) => {
-      if (punct) return '+'.repeat(all.length);
-      if (ticks) return ticks + all.slice(ticks.length, -ticks.length).replace(/`/g, '+') + ticks;
-      return all;
-    });
-    t = t.replace(INLINE.blockSkip, (all) => '[' + 'a'.repeat(all.length - 2) + ']');
+    if (this.linkCount !== 0 && src.includes('[') && src.includes(']')) t = this.maskReflinks(t);
+    if (src.includes('`') || src.includes('\\')) {
+      t = t.replace(INLINE.anyPunctuationOutsideCode, (all, ticks, punct) => {
+        if (punct) return '+'.repeat(all.length);
+        if (ticks) return ticks + all.slice(ticks.length, -ticks.length).replace(/`/g, '+') + ticks;
+        return all;
+      });
+    }
+    if (t.includes('[') || t.includes('`') || t.includes('<')) {
+      t = t.replace(INLINE.blockSkip, (all) => '[' + 'a'.repeat(all.length - 2) + ']');
+    }
     return t;
   }
 
@@ -844,15 +868,20 @@ class Lexer {
         tokens.push(tok);
         continue;
       }
-      if ((tok = this.textT(src))) {
-        src = src.substring(tok.raw.length);
-        if (tok.raw.slice(-1) !== '_') lastChar = tok.raw.slice(-1);
+      const n = scanTextLength(src);
+      if (n > 0) {
+        const raw = n === src.length ? src : src.slice(0, n);
+        const escaped = this.inRawBlock;
+        const text = escaped ? raw : raw.indexOf('&') < 0 ? raw : unescapeNumeric(raw);
+        const last = raw.charCodeAt(raw.length - 1);
+        src = src.substring(n);
+        if (last !== 95) lastChar = raw.charAt(raw.length - 1);
         wasText = true;
         const prev = tokens[tokens.length - 1];
-        if (prev && prev.type === 'text') {
-          prev.raw += tok.raw;
-          prev.text += tok.text;
-        } else tokens.push(tok);
+        if (prev !== undefined && prev.type === 'text') {
+          prev.raw += raw;
+          prev.text += text;
+        } else tokens.push({ type: 'text', raw, text, escaped });
         continue;
       }
       throw new Error('Infinite loop on byte: ' + src.charCodeAt(0));
@@ -986,15 +1015,15 @@ class Lexer {
     let back = offset;
     while (back > 0 && masked[back - 1] === ch) back--;
     const seg = masked.slice(Math.max(0, back - 2), back);
-    const prev = seg.length ? Array.from(seg).pop() : '';
-    const prevPunct = prev === '*' || prev === '_' || !!PUNCT.exec(prev);
+    const prev = lastCp(seg);
+    const prevPunct = prev === '*' || prev === '_' || PUNCT.test(prev);
     let before = startText;
     if (back < offset) before = prev;
-    const beforePunct = back < offset ? prevPunct : !!PUNCT.exec(before);
+    const beforePunct = back < offset ? prevPunct : PUNCT.test(before);
     if (m[4] && ALNUM.test(before)) return;
     const op = m[1] || m[3] || '';
     if (!op || !before || beforePunct) {
-      const runLen = Array.from(m[0]).length - 1;
+      const runLen = m[0].length - 1;
       if (ch !== '*' && ch !== '_') return;
       const delim = ch === '*' ? INLINE.emStrongRDelimAst : INLINE.emStrongRDelimUnd;
       const lastCloser = this.lastEmCloser(masked, ch);
@@ -1011,7 +1040,7 @@ class Lexer {
       while ((hit = delim.exec(scan)) !== null && !(hit.index > limit)) {
         const run = hit[1] || hit[2] || hit[3] || hit[4] || hit[5] || hit[6];
         if (!run) continue;
-        let len = Array.from(run).length;
+        let len = run.length;
         if (hit[3] || hit[4]) {
           balance += len;
           continue;
@@ -1025,7 +1054,7 @@ class Lexer {
         balance -= len;
         if (balance > 0) continue;
         len = Math.min(len, len + balance + carry);
-        const lead = Array.from(hit[0])[0].length;
+        const lead = firstCpLen(hit[0]);
         const raw = src.slice(0, runLen + hit.index + lead + len);
         if (Math.min(runLen, len) % 2) {
           const body = raw.slice(1, -1);
@@ -1040,8 +1069,8 @@ class Lexer {
   delT(src, masked, startText) {
     const m = INLINE.delLDelim.exec(src);
     if (!m) return;
-    if (!(m[1] || '') || !startText || PUNCT.exec(startText)) {
-      const runLen = Array.from(m[0]).length - 1;
+    if (!(m[1] || '') || !startText || PUNCT.test(startText)) {
+      const runLen = m[0].length - 1;
       const lastDel = this.lastDelCloser(masked);
       const base = masked.length - src.length + runLen;
       if (lastDel < base) return;
@@ -1054,7 +1083,7 @@ class Lexer {
       while ((hit = delim.exec(scan)) !== null && !(hit.index > limit)) {
         const run = hit[1] || hit[2] || hit[3] || hit[4] || hit[5] || hit[6];
         if (!run) continue;
-        let len = Array.from(run).length;
+        let len = run.length;
         if (len !== runLen) continue;
         if (hit[3] || hit[4]) {
           balance += len;
@@ -1063,7 +1092,7 @@ class Lexer {
         balance -= len;
         if (balance > 0) continue;
         len = Math.min(len, len + balance);
-        const lead = Array.from(hit[0])[0].length;
+        const lead = firstCpLen(hit[0]);
         const raw = src.slice(0, runLen + hit.index + lead + len);
         const body = raw.slice(runLen, -runLen);
         return { type: 'del', raw, text: body, tokens: this.inlineTokens(body) };
@@ -1146,9 +1175,17 @@ class Lexer {
   }
 
   urlPossible(src, c) {
-    if (c === 104 || c === 72 || c === 102 || c === 70 || c === 119 || c === 87) return true;
-    if ((c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 46 || c === 95 || c === 43 || c === 45) {
-      return src.indexOf('@') !== -1;
+    if (c === 104 || c === 72 || c === 102 || c === 70 || c === 119 || c === 87 || c === 109 || c === 120) return true;
+    if (c < 128 && LOCAL_PART[c] === 1) {
+      // An address match needs '@' right after the run of address characters.
+      const len = src.length;
+      let i = 1;
+      while (i < len) {
+        const d = src.charCodeAt(i);
+        if (d >= 128 || LOCAL_PART[d] === 0) break;
+        i++;
+      }
+      return i < len && src.charCodeAt(i) === 64;
     }
     return false;
   }
@@ -1251,19 +1288,42 @@ function emailRunBeforeAt(src, i, len) {
 function maskInfo(masked) {
   const em = { '*': -1, '_': -1 };
   let del = -1;
-  for (let i = 0; i < masked.length; i++) {
-    const c = masked[i];
-    if (c !== '*' && c !== '_' && c !== '~') continue;
-    const prev = i === 0 ? '\n' : masked[i - 1];
+  const n = masked.length;
+  for (let i = 0; i < n; i++) {
+    const c = masked.charCodeAt(i);
+    if (c !== 42 && c !== 95 && c !== 126) continue;
+    const prev = i === 0 ? 10 : masked.charCodeAt(i - 1);
     let j = i + 1;
-    while (j < masked.length && masked[j] === c) j++;
-    if (prev !== ' ' && prev !== '\t' && prev !== '\n' && prev !== '\r' && prev !== '\f') {
-      if (c === '~') del = i;
-      else em[c] = i;
+    while (j < n && masked.charCodeAt(j) === c) j++;
+    if (prev !== 32 && prev !== 9 && prev !== 10 && prev !== 13 && prev !== 12) {
+      if (c === 126) del = i;
+      else em[c === 42 ? '*' : '_'] = i;
     }
     i = j - 1;
   }
   return { maskedSrc: masked, em, del };
+}
+
+/** Length in code units of the first code point of s (s must be non-empty). */
+function firstCpLen(s) {
+  const c = s.charCodeAt(0);
+  if (c >= 0xd800 && c <= 0xdbff && s.length > 1) {
+    const d = s.charCodeAt(1);
+    if (d >= 0xdc00 && d <= 0xdfff) return 2;
+  }
+  return 1;
+}
+
+/** Last code point of s, as a string ('' for an empty string). */
+function lastCp(s) {
+  const n = s.length;
+  if (n === 0) return '';
+  const c = s.charCodeAt(n - 1);
+  if (c >= 0xdc00 && c <= 0xdfff && n > 1) {
+    const d = s.charCodeAt(n - 2);
+    if (d >= 0xd800 && d <= 0xdbff) return s.slice(n - 2);
+  }
+  return s.slice(n - 1);
 }
 
 /** Remove up to the fence's own indentation prefix from every line. */
@@ -1378,15 +1438,41 @@ function startsContentAt(line, n, htmlRe) {
   return false;
 }
 
+/** True when s ends in a blank line (only spaces/tabs before its last newline). */
+function endsWithBlankLine(s) {
+  let i = s.length;
+  while (i > 0) {
+    const c = s.charCodeAt(i - 1);
+    if (c !== 32 && c !== 9) break;
+    i--;
+  }
+  if (i === 0 || s.charCodeAt(i - 1) !== 10) return false;
+  i--;
+  while (i > 0) {
+    const c = s.charCodeAt(i - 1);
+    if (c !== 32 && c !== 9) break;
+    i--;
+  }
+  return i > 0 && s.charCodeAt(i - 1) === 10;
+}
+
 /** Split a GFM table row into trimmed cells. */
 function splitRow(row, cols) {
-  const spaced = row.replace(/\|/g, (all, offset, str) => {
-    let escaped = false;
-    let p = offset;
-    while (--p >= 0 && str[p] === '\\') escaped = !escaped;
-    return escaped ? '|' : ' |';
-  });
-  const cells = spaced.split(/ \|/);
+  // marked spaces out every unescaped pipe and splits on " |"; doing it in one
+  // scan gives the same cells.
+  const len = row.length;
+  const cells = [];
+  let start = 0;
+  for (let i = 0; i < len; i++) {
+    if (row.charCodeAt(i) !== 124) continue;
+    let backslashes = 0;
+    for (let j = i - 1; j >= 0 && row.charCodeAt(j) === 92; j--) backslashes++;
+    if (backslashes % 2 === 0) {
+      cells.push(row.slice(start, i));
+      start = i + 1;
+    }
+  }
+  cells.push(row.slice(start));
   if (!cells[0].trim()) cells.shift();
   if (cells.length > 0 && !cells[cells.length - 1].trim()) cells.pop();
   if (cols) {
