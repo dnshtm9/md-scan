@@ -24,6 +24,45 @@ for (const c of cases) {
 }
 
 console.log(`cases_passed ${pass} / ${cases.length}`);
+
+// Audit regressions: shapes found by differential probing that once failed.
+// Expected HTML is marked's (the reference) for general parser shapes, not
+// anything tied to the practice set.
+const regressions = [
+  ['~~🙂a🙂~~', '<p><del>🙂a🙂</del></p>\n'],
+  ['~~🙂a~~', '<p><del>🙂a</del></p>\n'],
+  ['**🙂a**', '<p><strong>🙂a</strong></p>\n'],
+  ['**🙂a🙂**', '<p><strong>🙂a🙂</strong></p>\n'],
+  ['__🙂a__', '<p><strong>🙂a</strong></p>\n'],
+  ['__🙂a🙂__', '<p><strong>🙂a🙂</strong></p>\n'],
+  ['_🙂a_', '<p><em>🙂a</em></p>\n'],
+  ['*🙂a*', '<p><em>🙂a</em></p>\n'],
+  ['~~🙂~~', '<p><del>🙂</del></p>\n'],
+  ['~~🙂a~~ and ~~b~~', '<p><del>🙂a</del> and <del>b</del></p>\n'],
+  ['***🙂a***', '<p><em><strong>🙂a</strong></em></p>\n'],
+  ['**𝐀a**', '<p><strong>𝐀a</strong></p>\n'],
+  ['~~𝐀a~~', '<p><del>𝐀a</del></p>\n'],
+  ['_𝐀a_', '<p><em>𝐀a</em></p>\n'],
+  ['*🙂a* + ~~🙂b~~', '<p><em>🙂a</em> + <del>🙂b</del></p>\n'],
+];
+let regPass = 0;
+for (const [md, want] of regressions) {
+  let got;
+  try {
+    got = parse(md);
+  } catch (e) {
+    got = `THREW: ${e && e.message}`;
+  }
+  if (got === want) regPass++;
+  else {
+    failures.push({ id: `regression ${JSON.stringify(md)}`, got, want });
+    console.log(`\nREGRESSION FAIL ${JSON.stringify(md)}`);
+    console.log('  want', JSON.stringify(want));
+    console.log('  got ', JSON.stringify(got));
+  }
+}
+console.log(`audit_regressions ${regPass} / ${regressions.length}`);
+
 const show = Number(process.env.SHOW ?? 10);
 for (const f of failures.slice(0, show)) {
   let at = 0;

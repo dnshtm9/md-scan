@@ -184,6 +184,22 @@ const INLINE = {
   text: /^(?:[^a-zA-Z0-9](?=(?:mailto|xmpp):)|(`+|~+|[^`~])(?:(?=[`~])|(?= {2,}\n)|(?=[a-zA-Z0-9.!#$%&'*+\/=?_`{\|}~-]+@)|[\s\S]*?(?:(?=[\\<!\[`*~_]|\b_|[hH][tT][tT][pP][sS]?|[fF][tT][pP]:\/\/|(?<![^\s*_~(])www\.|$)|[^ ](?= {2,}\n)|[^a-zA-Z0-9](?=(?:mailto|xmpp):)|[^a-zA-Z0-9.!#$%&'*+\/=?_`{\|}~-](?=[a-zA-Z0-9.!#$%&'*+\/=?_`{\|}~-]+@))))/,
 };
 
+/** Length in code points of the delimiter run matched by a del/emStrong left
+ *  delimiter match: the run minus one for the flanking punctuation char, the
+ *  same way marked measures it with [...s[0]].length - 1. The run itself is
+ *  pure ASCII, so only a trailing astral flanking char changes the count. */
+function runLenCp(m0) {
+  const n = m0.length;
+  if (n > 1) {
+    const h = m0.charCodeAt(n - 2);
+    if (h >= 0xd800 && h <= 0xdbff) {
+      const l = m0.charCodeAt(n - 1);
+      if (l >= 0xdc00 && l <= 0xdfff) return n - 2;
+    }
+  }
+  return n - 1;
+}
+
 /* ================================ lexer ================================= */
 
 /** True when the line after the first could be a table delimiter row. */
@@ -1052,7 +1068,7 @@ class Lexer {
     if (m[4] && ALNUM.test(before)) return;
     const op = m[1] || m[3] || '';
     if (!op || !before || beforePunct) {
-      const runLen = m[0].length - 1;
+      const runLen = runLenCp(m[0]);
       if (ch !== '*' && ch !== '_') return;
       const delim = ch === '*' ? INLINE.emStrongRDelimAst : INLINE.emStrongRDelimUnd;
       const lastCloser = this.lastEmCloser(masked, ch);
@@ -1099,7 +1115,7 @@ class Lexer {
     const m = INLINE.delLDelim.exec(src);
     if (!m) return;
     if (!(m[1] || '') || !startText || PUNCT.test(startText)) {
-      const runLen = m[0].length - 1;
+      const runLen = runLenCp(m[0]);
       const lastDel = this.lastDelCloser(masked);
       const base = masked.length - src.length + runLen;
       if (lastDel < base) return;
