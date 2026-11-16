@@ -1232,12 +1232,6 @@ function isAlnumCode(c) {
   return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
 }
 
-function isTextWhitespace(s, i) {
-  const c = s.charCodeAt(i);
-  if (c < 128) return c === 32 || c === 9 || c === 10 || c === 11 || c === 12 || c === 13;
-  return PREV_WS.test(s.charAt(i));
-}
-
 /**
  * Length of the next inline-text token, reproducing marked's text rule:
  * a plain run that ends before a construct, a protocol/www/email trigger or
@@ -1365,22 +1359,6 @@ function stripIndent(fenceRaw, text) {
     if (lead === null) return line;
     return line.slice(Math.min(lead[0].length, prefix.length));
   }).join('\n');
-}
-
-/** Number of leading spaces/tabs on a line. */
-function leadingWhitespace(line) {
-  let i = 0;
-  while (i < line.length) {
-    const c = line.charCodeAt(i);
-    if (c !== 32 && c !== 9) break;
-    i++;
-  }
-  return i;
-}
-
-function hasTabBefore(line, lead) {
-  for (let i = 0; i < lead; i++) if (line.charCodeAt(i) === 9) return true;
-  return false;
 }
 
 /** Width of the expanded leading whitespace run. */
