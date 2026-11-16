@@ -623,19 +623,6 @@ class Lexer {
     };
   }
 
-  paragraph(src) {
-    const m = GF_BLOCK.paragraph.exec(src);
-    if (!m) return;
-    const text = m[1].charAt(m[1].length - 1) === '\n' ? m[1].slice(0, -1) : m[1];
-    return { type: 'paragraph', raw: m[0], text, tokens: this.inline(text) };
-  }
-
-  textBlock(src) {
-    const m = BLOCK.text.exec(src);
-    if (!m) return;
-    return { type: 'text', raw: m[0], text: m[0], tokens: this.inline(m[0]) };
-  }
-
   /* ---------------- cached indent regexes ---------------- */
 
   itemRe(markerSrc) {
@@ -753,29 +740,38 @@ class Lexer {
         tokens.push(tok);
         continue;
       }
-      if (this.top && (tok = this.paragraph(src))) {
-        const prev = tokens[tokens.length - 1];
-        if (joinParagraphs && prev && prev.type === 'paragraph') {
-          prev.raw += (prev.raw.endsWith('\n') ? '' : '\n') + tok.raw;
-          prev.text += '\n' + tok.text;
-          this.queue.pop();
-          this.queue[this.queue.length - 1].src = prev.text;
-        } else {
-          tokens.push(tok);
+      if (this.top) {
+        // Paragraphs join onto the previous one without materialising a new
+        // token or queue entry: both would be discarded by the merge.
+        const m = GF_BLOCK.paragraph.exec(src);
+        if (m) {
+          const text = m[1].charAt(m[1].length - 1) === '\n' ? m[1].slice(0, -1) : m[1];
+          const raw = m[0];
+          const prev = tokens[tokens.length - 1];
+          if (joinParagraphs && prev && prev.type === 'paragraph') {
+            prev.raw += (prev.raw.endsWith('\n') ? '' : '\n') + raw;
+            prev.text += '\n' + text;
+            this.queue[this.queue.length - 1].src = prev.text;
+          } else {
+            tokens.push({ type: 'paragraph', raw, text, tokens: this.inline(text) });
+          }
+          joinParagraphs = false;
+          src = src.substring(raw.length);
+          continue;
         }
-        joinParagraphs = false;
-        src = src.substring(tok.raw.length);
-        continue;
       }
-      if ((tok = this.textBlock(src))) {
-        src = src.substring(tok.raw.length);
+      const tm = BLOCK.text.exec(src);
+      if (tm) {
+        const raw = tm[0];
         const prev = tokens[tokens.length - 1];
         if (prev && prev.type === 'text') {
-          prev.raw += (prev.raw.endsWith('\n') ? '' : '\n') + tok.raw;
-          prev.text += '\n' + tok.text;
-          this.queue.pop();
+          prev.raw += (prev.raw.endsWith('\n') ? '' : '\n') + raw;
+          prev.text += '\n' + raw;
           this.queue[this.queue.length - 1].src = prev.text;
-        } else tokens.push(tok);
+        } else {
+          tokens.push({ type: 'text', raw, text: raw, tokens: this.inline(raw) });
+        }
+        src = src.substring(raw.length);
         continue;
       }
       throw new Error('Infinite loop on byte: ' + src.charCodeAt(0));
