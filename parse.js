@@ -149,7 +149,7 @@ for (const ch of 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
 
 // Per-character flags for the inline text scan:
 // 1 stops the run, 2 is a space, 4 starts a protocol, 8 is not alphanumeric,
-// 16 is an e-mail address character.
+// 16 is an e-mail address character, 32 needs HTML escaping.
 const SCAN = new Uint8Array(128);
 for (let c = 0; c < 128; c++) {
   if (TEXT_STOP[c] === 1) SCAN[c] = 1;
@@ -157,8 +157,17 @@ for (let c = 0; c < 128; c++) {
   else if (c === 104 || c === 72 || c === 102 || c === 70 || c === 119) SCAN[c] |= 4;
   if (!(c >= 48 && c <= 57) && !(c >= 65 && c <= 90) && !(c >= 97 && c <= 122)) SCAN[c] |= 8;
   if (EMAIL_CHAR[c] === 1) SCAN[c] |= 16;
+  if (c === 38 || c === 60 || c === 62 || c === 34 || c === 39) SCAN[c] |= 32;
 }
 const ANY_LINE = /\n.*\n/;
+
+// Set by scanTextLength for the run it just measured: true when the run
+// contains a character that esc() would rewrite. Invariant: every call with a
+// non-empty source assigns it before returning (line at the top of the scan),
+// and the only reader (inlineScan) reads it immediately after such a call with
+// n > 0. parse() clears it, so a value can never outlive its run or its
+// parse() call.
+let TEXT_ESC = false;
 
 const INLINE = {
   escape: /^\\([!"#$%&'()*+,\-./:;<=>?@\[\]\\^_`{|}~])/,
@@ -252,7 +261,7 @@ class Lexer {
     this.links = Object.create(null);
     this.linkCount = 0;
     this.queue = [];
-    this.masks = [];
+    this.maskFrame = null;
     this.itemRes = new Map();
     this.htmlRes = [];
   }
@@ -788,46 +797,31 @@ class Lexer {
   inlineRender(src, needPlain = false) {
     const savedParen = this.linkParenPossible;
     const savedNeed = this.needPlain;
+    const savedFrame = this.maskFrame;
     this.linkParenPossible = savedParen && src.includes(')');
     this.needPlain = needPlain;
+    this.maskFrame = null;
     const hasAt = src.includes('@');
-    // Only a source that can contain an emphasis/strike delimiter needs the
-    // mask; everything else can go straight to the loop. The mask itself is
-    // built on first use, since the delimiter may sit inside a construct that
-    // is tokenised before it.
-    if (!(src.includes('*') || src.includes('_') || src.includes('~'))) {
-      try {
-        return this.inlineScan(src, null, hasAt);
-      } finally {
-        this.linkParenPossible = savedParen;
-        this.needPlain = savedNeed;
-      }
-    }
-    const mask = {
-      full: src,
-      masked: null,
-      // The mask only rewrites code spans, link text, tags and escapes.
-      needed: src.includes('`') || src.includes('[') || src.includes('<') || src.includes('\\'),
-    };
-    this.masks.push({ maskedSrc: null, em: null, del: -1 });
+    // The mask frame is only created if a delimiter actually opens emphasis
+    // or strikethrough, so sources without one never pay for it.
     try {
-      return this.inlineScan(src, mask, hasAt);
+      return this.inlineScan(src, hasAt);
     } finally {
-      this.masks.pop();
+      this.maskFrame = savedFrame;
       this.linkParenPossible = savedParen;
       this.needPlain = savedNeed;
     }
   }
 
-  /** The mask of a whole inline source, computed at most once. */
-  maskOf(mask) {
-    let masked = mask.masked;
-    if (masked === null) {
-      masked = mask.needed ? this.buildMask(mask.full) : mask.full;
-      mask.masked = masked;
-      this.masks[this.masks.length - 1].maskedSrc = masked;
+  /** The mask of a whole inline source, computed at most once per call. */
+  maskOf(src) {
+    let frame = this.maskFrame;
+    if (frame === null) {
+      // The mask only rewrites code spans, link text, tags and escapes.
+      const needed = src.includes('`') || src.includes('[') || src.includes('<') || src.includes('\\');
+      frame = this.maskFrame = { masked: needed ? this.buildMask(src) : src, em: null, del: -1 };
     }
-    return masked;
+    return frame.masked;
   }
 
   buildMask(src) {
@@ -876,7 +870,8 @@ class Lexer {
     return false;
   }
 
-  inlineScan(src, mask, hasAt) {
+  inlineScan(src, hasAt) {
+    const fullSrc = src;
     let html = '';
     let plain = '';
     const needPlain = this.needPlain;
@@ -900,11 +895,11 @@ class Lexer {
       } else if (c === 91 || c === 33) {
         tok = this.linkT(src) || this.reflinkT(src);
       } else if (c === 42 || c === 95) {
-        tok = this.emStrongT(src, mask, lastChar);
+        tok = this.emStrongT(src, fullSrc, lastChar);
       } else if (c === 96) {
         tok = this.codespanT(src);
       } else if (c === 126) {
-        tok = this.delT(src, mask, lastChar);
+        tok = this.delT(src, fullSrc, lastChar);
       } else if (c === 32) {
         tok = this.brT(src);
       }
@@ -914,7 +909,7 @@ class Lexer {
         if (needPlain) plain += tok.plain;
         continue;
       }
-      if (!this.inLink && this.urlPossible(src, c) && (tok = this.urlT(src))) {
+      if (!this.inLink && this.urlPossible(src, c, hasAt) && (tok = this.urlT(src))) {
         src = src.substring(tok.raw.length);
         html += tok.html;
         if (needPlain) plain += tok.plain;
@@ -929,7 +924,7 @@ class Lexer {
         src = src.substring(n);
         if (last !== 95) lastChar = raw.charAt(raw.length - 1);
         wasText = true;
-        html += escaped ? text : esc(text);
+        html += escaped || !TEXT_ESC ? text : esc(text);
         if (needPlain) plain += text;
         continue;
       }
@@ -1059,11 +1054,11 @@ class Lexer {
     return this.makeLink(m[1], link, m[0]);
   }
 
-  emStrongT(src, mask, startText) {
+  emStrongT(src, fullSrc, startText) {
     let m = INLINE.emStrongLDelim.exec(src);
     if (!m || (!m[1] && !m[2] && !m[3] && !m[4])) return;
     // The mask is only consulted once this run can actually open emphasis.
-    const masked = this.maskOf(mask);
+    const masked = this.maskOf(fullSrc);
     const ch = m[0][0];
     const sameStart = startText === ch;
     const offset = masked.length - src.length;
@@ -1121,11 +1116,11 @@ class Lexer {
     }
   }
 
-  delT(src, mask, startText) {
+  delT(src, fullSrc, startText) {
     const m = INLINE.delLDelim.exec(src);
     if (!m) return;
     if (!(m[1] || '') || !startText || PUNCT.test(startText)) {
-      const masked = this.maskOf(mask);
+      const masked = this.maskOf(fullSrc);
       const runLen = runLenCp(m[0]);
       const lastDel = this.lastDelCloser(masked);
       const base = masked.length - src.length + runLen;
@@ -1157,27 +1152,27 @@ class Lexer {
   }
 
   lastEmCloser(masked, ch) {
-    const top = this.masks[this.masks.length - 1];
-    if (top && top.maskedSrc === masked) {
-      if (top.em === null) {
+    const frame = this.maskFrame;
+    if (frame && frame.masked === masked) {
+      if (frame.em === null) {
         const info = maskInfo(masked);
-        top.em = info.em;
-        top.del = info.del;
+        frame.em = info.em;
+        frame.del = info.del;
       }
-      return top.em[ch];
+      return frame.em[ch];
     }
     return maskInfo(masked).em[ch];
   }
 
   lastDelCloser(masked) {
-    const top = this.masks[this.masks.length - 1];
-    if (top && top.maskedSrc === masked) {
-      if (top.em === null) {
+    const frame = this.maskFrame;
+    if (frame && frame.masked === masked) {
+      if (frame.em === null) {
         const info = maskInfo(masked);
-        top.em = info.em;
-        top.del = info.del;
+        frame.em = info.em;
+        frame.del = info.del;
       }
-      return top.del;
+      return frame.del;
     }
     return maskInfo(masked).del;
   }
@@ -1242,9 +1237,9 @@ class Lexer {
     };
   }
 
-  urlPossible(src, c) {
+  urlPossible(src, c, hasAt) {
     if (c === 104 || c === 72 || c === 102 || c === 70 || c === 119 || c === 87 || c === 109 || c === 120) return true;
-    if (c < 128 && LOCAL_PART[c] === 1) {
+    if (hasAt && c < 128 && LOCAL_PART[c] === 1) {
       // An address match needs '@' right after the run of address characters.
       const len = src.length;
       let i = 1;
@@ -1280,6 +1275,7 @@ function scanTextLength(src, hasAt) {
   const len = src.length;
   if (len === 0) return 0;
   const c0 = src.charCodeAt(0);
+  TEXT_ESC = c0 < 128 && (SCAN[c0] & 32) !== 0;
   if (!isAlnumCode(c0)) {
     const d = src.charCodeAt(1);
     if (d === 109 ? src.startsWith('mailto:', 1) : d === 120 && src.startsWith('xmpp:', 1)) return 1;
@@ -1336,6 +1332,7 @@ function scanTextLength(src, hasAt) {
       if (d === 109 ? src.startsWith('mailto:', q + 1) : d === 120 && src.startsWith('xmpp:', q + 1)) return q + 1;
     }
     if (hasAt && (f & 16) !== 0 && !prevEmail && emailRunBeforeAt(src, q, len)) return q;
+    if ((f & 32) !== 0) TEXT_ESC = true;
     prevEmail = (f & 16) !== 0;
     q++;
   }
@@ -1683,6 +1680,7 @@ class Renderer {
 /* ================================ entry ================================= */
 
 export function parse(markdown) {
+  TEXT_ESC = false;
   const lexer = new Lexer();
   const tokens = lexer.lex(markdown);
   return new Renderer().parse(tokens);

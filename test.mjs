@@ -10,20 +10,37 @@ const expected = new Map(ref.cases.map((c) => [c.id, c.html]));
 
 let pass = 0;
 const failures = [];
+const firstPass = [];
 for (const c of cases) {
   const want = expected.get(c.id);
   let got;
   try {
     got = parse(c.markdown);
   } catch (e) {
-    failures.push({ id: c.id, got: `THREW: ${e && e.message}`, want });
+    got = `THREW: ${e && e.message}`;
+    failures.push({ id: c.id, got, want });
+    firstPass.push(null);
     continue;
   }
+  firstPass.push(got);
   if (got === want) pass++;
   else failures.push({ id: c.id, got, want });
 }
 
 console.log(`cases_passed ${pass} / ${cases.length}`);
+
+// Determinism: a second full pass over all cases in the same process must
+// reproduce the first pass byte for byte. This guards module-level scan state
+// (TEXT_ESC) from leaking within a parse or between parse calls.
+let stable = 0;
+for (let i = 0; i < cases.length; i++) {
+  const a = firstPass[i];
+  if (a === null) continue;
+  const b = parse(cases[i].markdown);
+  if (a === b) stable++;
+  else failures.push({ id: `nondeterministic ${cases[i].id}`, got: 'second pass differs', want: 'identical to first pass' });
+}
+console.log(`determinism ${stable} / ${cases.length}`);
 
 // Audit regressions: shapes found by differential probing that once failed.
 // Expected HTML is marked's (the reference) for general parser shapes, not
