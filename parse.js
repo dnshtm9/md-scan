@@ -173,6 +173,11 @@ const ANY_LINE = /\n.*\n/;
 // parse() call.
 let TEXT_ESC = false;
 
+// Same-length replacements for masked constructs, reused by length: masking
+// visits every link, code span and tag in a source, and they repeat shapes.
+const MASK_FILL = [];
+const maskFill = (n) => MASK_FILL[n] || (MASK_FILL[n] = '[' + 'a'.repeat(n - 2) + ']');
+
 const INLINE = {
   escape: /^\\([!"#$%&'()*+,\-./:;<=>?@\[\]\\^_`{|}~])/,
   tag: /^<!--(?:-?>|[\s\S]*?-->)|^<\/[a-zA-Z][a-zA-Z0-9-]*\s*>|^<[a-zA-Z][a-zA-Z0-9-]*(?:\s+[a-zA-Z:_][\w.:-]*(?:\s*=\s*"[^"]*"|\s*=\s*'[^']*'|\s*=\s*[^\s"'=<>`]+)?)*?\s*\/?>|^<\?[\s\S]*?\?>|^<![a-zA-Z]+\s[\s\S]*?>|^<!\[CDATA\[[\s\S]*?\]\]>/,
@@ -844,7 +849,7 @@ class Lexer {
       });
     }
     if (t.includes('[') || t.includes('`') || t.includes('<')) {
-      t = t.replace(INLINE.blockSkip, (all) => '[' + 'a'.repeat(all.length - 2) + ']');
+      t = t.replace(INLINE.blockSkip, (all) => maskFill(all.length));
     }
     return t;
   }
@@ -1302,8 +1307,15 @@ function scanTextLength(src, hasAt) {
       // A plain alphanumeric character can only end the run by starting an
       // e-mail address right after a non-address character.
       if (hasAt && !prevEmail && emailRunBeforeAt(src, q, len)) return q;
-      prevEmail = true;
+      // Consume the whole plain alphanumeric run in a tight loop; these
+      // characters cannot trip any of the other rules.
       q++;
+      while (q < len) {
+        const c2 = src.charCodeAt(q);
+        if (c2 >= 128 || SCAN[c2] !== 16) break;
+        q++;
+      }
+      prevEmail = true;
       continue;
     }
     if (f & 1) return q;
