@@ -1,10 +1,8 @@
 # md-scan
 
 [![make.fun · markdown-render-speed-02](https://make.fun/badge/markdown-render-speed-02.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
-[![rank](https://make.fun/badge/markdown-render-speed-02/dnshtm9/md-scan/rank.svg)](https://make.fun/bounty/markdown-render-speed-02/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
-[![reward](https://make.fun/badge/markdown-render-speed-02/dnshtm9/md-scan/reward.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
 
-A dependency-free, hand-written scanner that renders byte-identical HTML to marked 18.1.3 (GFM defaults) with no token tree: blocks and inline constructs are recognized by direct index scanning and the HTML is emitted as each construct is matched. On the 720-case benchmark it renders the whole set about 1.9x faster than marked itself (wall-clock minimum 334 ms vs 626 ms, best round 2.40x).
+A dependency-free, hand-written scanner that renders byte-identical HTML to marked 18.1.3 (GFM defaults) with no token tree: blocks and inline constructs are recognized by direct index scanning and the HTML is emitted as each construct is matched. On the 720-case benchmark it renders the whole set about 1.9x faster than marked on a desktop (wall-clock minimum 334 ms vs 626 ms); in the grader's 1-CPU container the margin narrows to about 1.4x (2.52 s against marked's ~3.5 s net), because a native regex engine keeps more of its speed than hand-written JS character loops when the CPU is throttled.
 
 ## Run it
 
